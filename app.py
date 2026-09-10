@@ -36,6 +36,10 @@ def init_db():
     conn = get_connection()
     cur = conn.cursor()
 
+    # =====================================================
+    # PRICES TABLOSU
+    # =====================================================
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS prices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +58,53 @@ def init_db():
         )
     """)
 
+    # Eski veritabanlarında eksik sütunları kontrol et
+    cur.execute("PRAGMA table_info(prices)")
+
+    existing_columns = {
+        row[1] for row in cur.fetchall()
+    }
+
+    columns_to_add = {
+        "origin": "TEXT",
+        "destination": "TEXT",
+        "departure_date": "TEXT",
+        "currency": "TEXT",
+        "airline": "TEXT",
+        "flight_number": "TEXT",
+        "duration_minutes": "INTEGER",
+        "baggage": "TEXT",
+        "self_transfer": "INTEGER DEFAULT 0",
+        "seen_at": "TEXT"
+    }
+
+    for column_name, column_type in columns_to_add.items():
+
+        if column_name not in existing_columns:
+
+            print(
+                f"Veritabani guncelleniyor: "
+                f"{column_name} sutunu ekleniyor."
+            )
+
+            cur.execute(
+                f"ALTER TABLE prices "
+                f"ADD COLUMN {column_name} {column_type}"
+            )
+
+    # Eski kayıtlarda seen_at boşsa mevcut zamanı yaz
+    cur.execute("""
+        UPDATE prices
+        SET seen_at = ?
+        WHERE seen_at IS NULL
+    """, (
+        datetime.utcnow().isoformat(),
+    ))
+
+    # =====================================================
+    # VERIFICATIONS TABLOSU
+    # =====================================================
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS verifications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,6 +115,10 @@ def init_db():
             checked_at TEXT NOT NULL
         )
     """)
+
+    # =====================================================
+    # ALERTS TABLOSU
+    # =====================================================
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS alerts (
@@ -80,12 +135,17 @@ def init_db():
     conn.commit()
     conn.close()
 
+    print(
+        "Veritabani kontrolu ve guncellemesi tamamlandi."
+    )
+
 
 # =========================================================
 # IGNAV
 # =========================================================
 
 def ignav_search(origin, destination, departure_date):
+
     api_key = os.getenv("IGNAV_API_KEY")
 
     if not api_key:
@@ -116,6 +176,7 @@ def ignav_search(origin, destination, departure_date):
     }
 
     try:
+
         response = requests.post(
             url,
             json=payload,
@@ -130,14 +191,21 @@ def ignav_search(origin, destination, departure_date):
         )
 
         if response.status_code != 200:
+
             print("Ignav API cevabi:")
             print(response.text[:1000])
+
             return None
 
         return response.json()
 
     except Exception as e:
-        print("Ignav hatasi:", repr(e))
+
+        print(
+            "Ignav hatasi:",
+            repr(e)
+        )
+
         return None
 
 
@@ -146,24 +214,44 @@ def ignav_search(origin, destination, departure_date):
 # =========================================================
 
 def extract_flights(data):
+
     if not data:
         return []
 
-    itineraries = data.get("itineraries", [])
+    itineraries = data.get(
+        "itineraries",
+        []
+    )
 
     results = []
 
     for item in itineraries:
-        price_info = item.get("price", {})
-        outbound = item.get("outbound", {})
 
-        price = price_info.get("amount")
-        currency = price_info.get("currency")
+        price_info = item.get(
+            "price",
+            {}
+        )
+
+        outbound = item.get(
+            "outbound",
+            {}
+        )
+
+        price = price_info.get(
+            "amount"
+        )
+
+        currency = price_info.get(
+            "currency"
+        )
 
         if price is None:
             continue
 
-        segments = outbound.get("segments", [])
+        segments = outbound.get(
+            "segments",
+            []
+        )
 
         if not segments:
             continue
@@ -224,15 +312,25 @@ def extract_flights(data):
         )
 
         results.append({
+
             "flight_key": flight_key,
+
             "origin": origin,
+
             "destination": destination,
+
             "price": float(price),
+
             "currency": currency,
+
             "airline": airline,
+
             "flight_number": flight_number,
+
             "duration_minutes": duration,
+
             "baggage": baggage_text,
+
             "self_transfer": self_transfer
         })
 
@@ -250,6 +348,7 @@ def create_flight_key(
     airline,
     duration
 ):
+
     return (
         f"{origin}-"
         f"{destination}-"
@@ -263,7 +362,11 @@ def create_flight_key(
 # FİYAT KAYDETME
 # =========================================================
 
-def save_flight(flight, departure_date):
+def save_flight(
+    flight,
+    departure_date
+):
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -284,17 +387,31 @@ def save_flight(flight, departure_date):
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
+
         flight["flight_key"],
+
         flight["origin"],
+
         flight["destination"],
+
         departure_date,
+
         flight["price"],
+
         flight["currency"],
+
         flight["airline"],
+
         flight["flight_number"],
+
         flight["duration_minutes"],
+
         flight["baggage"],
-        int(flight["self_transfer"]),
+
+        int(
+            flight["self_transfer"]
+        ),
+
         datetime.utcnow().isoformat()
     ))
 
@@ -312,6 +429,7 @@ def get_route_history(
     currency,
     exclude_price=None
 ):
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -330,15 +448,22 @@ def get_route_history(
     ]
 
     if exclude_price is not None:
+
         query += " AND price != ?"
-        params.append(exclude_price)
+
+        params.append(
+            exclude_price
+        )
 
     query += """
         ORDER BY seen_at DESC
         LIMIT 200
     """
 
-    cur.execute(query, params)
+    cur.execute(
+        query,
+        params
+    )
 
     rows = cur.fetchall()
 
@@ -360,6 +485,7 @@ def calculate_normal_price(
     currency,
     current_price=None
 ):
+
     history = get_route_history(
         origin,
         destination,
@@ -368,6 +494,7 @@ def calculate_normal_price(
     )
 
     if len(history) < 3:
+
         return {
             "normal_price": None,
             "sample_count": len(history),
@@ -379,11 +506,14 @@ def calculate_normal_price(
     )
 
     return {
+
         "normal_price": round(
             median_price,
             2
         ),
+
         "sample_count": len(history),
+
         "confidence": (
             "yuksek"
             if len(history) >= 20
@@ -402,10 +532,12 @@ def calculate_market_divergence(
     current_price,
     normal_price
 ):
+
     if (
         normal_price is None
         or normal_price <= 0
     ):
+
         return {
             "drop_percent": 0,
             "market_points": 0
@@ -422,29 +554,48 @@ def calculate_market_divergence(
     ) * 100
 
     if drop_percent <= 0:
+
         points = 0
+
     elif drop_percent >= 70:
+
         points = 25
+
     elif drop_percent >= 60:
+
         points = 22
+
     elif drop_percent >= 50:
+
         points = 19
+
     elif drop_percent >= 40:
+
         points = 16
+
     elif drop_percent >= 30:
+
         points = 13
+
     elif drop_percent >= 20:
+
         points = 9
+
     elif drop_percent >= 10:
+
         points = 5
+
     else:
+
         points = 2
 
     return {
+
         "drop_percent": round(
             drop_percent,
             2
         ),
+
         "market_points": points
     }
 
@@ -458,39 +609,54 @@ def calculate_error_score(
     normal_data,
     previous_price=None
 ):
+
     score = 0
 
     normal_price = (
         normal_data["normal_price"]
     )
 
-    # Tarihsel anomali - 20 puan
+    # Tarihsel anomali
     historical_points = 0
 
     if normal_price:
+
         drop = (
             (normal_price - flight["price"])
             / normal_price
         ) * 100
 
         if drop >= 70:
+
             historical_points = 20
+
         elif drop >= 60:
+
             historical_points = 17
+
         elif drop >= 50:
+
             historical_points = 14
+
         elif drop >= 40:
+
             historical_points = 11
+
         elif drop >= 30:
+
             historical_points = 8
+
         elif drop >= 20:
+
             historical_points = 5
+
         elif drop >= 10:
+
             historical_points = 2
 
     score += historical_points
 
-    # Market divergence - 25 puan
+    # Market divergence
     market = calculate_market_divergence(
         flight["price"],
         normal_price
@@ -498,49 +664,64 @@ def calculate_error_score(
 
     score += market["market_points"]
 
-    # Ani düşüş - 10 puan
+    # Ani düşüş
     sudden_drop_points = 0
 
     if (
         previous_price
         and previous_price > 0
     ):
+
         drop_from_previous = (
             (previous_price - flight["price"])
             / previous_price
         ) * 100
 
         if drop_from_previous >= 50:
+
             sudden_drop_points = 10
+
         elif drop_from_previous >= 30:
+
             sudden_drop_points = 7
+
         elif drop_from_previous >= 20:
+
             sudden_drop_points = 5
+
         elif drop_from_previous >= 10:
+
             sudden_drop_points = 2
 
     score += sudden_drop_points
 
     return {
+
         "score": round(
             min(score, 100),
             2
         ),
-        "historical_points": historical_points,
-        "market_points": market[
-            "market_points"
-        ],
-        "sudden_drop_points": sudden_drop_points,
-        "normal_price": normal_price,
-        "drop_percent": market[
-            "drop_percent"
-        ],
-        "sample_count": normal_data[
-            "sample_count"
-        ],
-        "confidence": normal_data[
-            "confidence"
-        ]
+
+        "historical_points":
+            historical_points,
+
+        "market_points":
+            market["market_points"],
+
+        "sudden_drop_points":
+            sudden_drop_points,
+
+        "normal_price":
+            normal_price,
+
+        "drop_percent":
+            market["drop_percent"],
+
+        "sample_count":
+            normal_data["sample_count"],
+
+        "confidence":
+            normal_data["confidence"]
     }
 
 
@@ -554,6 +735,7 @@ def get_previous_route_price(
     currency,
     current_price
 ):
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -567,9 +749,13 @@ def get_previous_route_price(
         ORDER BY seen_at DESC
         LIMIT 1
     """, (
+
         origin,
+
         destination,
+
         currency,
+
         current_price
     ))
 
@@ -578,7 +764,10 @@ def get_previous_route_price(
     conn.close()
 
     if row:
-        return float(row[0])
+
+        return float(
+            row[0]
+        )
 
     return None
 
@@ -591,6 +780,7 @@ def verify_flight(
     flight,
     departure_date
 ):
+
     data = ignav_search(
         flight["origin"],
         flight["destination"],
@@ -598,12 +788,18 @@ def verify_flight(
     )
 
     if not data:
+
         return {
+
             "verified": False,
-            "reason": "İkinci arama başarısız."
+
+            "reason":
+                "İkinci arama başarısız."
         }
 
-    flights = extract_flights(data)
+    flights = extract_flights(
+        data
+    )
 
     for item in flights:
 
@@ -611,6 +807,7 @@ def verify_flight(
             item["flight_key"]
             != flight["flight_key"]
         ):
+
             continue
 
         price_match = (
@@ -635,17 +832,26 @@ def verify_flight(
             and currency_match
             and self_transfer_match
         ):
+
             return {
+
                 "verified": True,
-                "price": item["price"],
-                "currency": item["currency"],
+
+                "price":
+                    item["price"],
+
+                "currency":
+                    item["currency"],
+
                 "reason":
                     "Aynı uçuş ve aynı fiyat "
                     "ikinci aramada görüldü."
             }
 
     return {
+
         "verified": False,
+
         "reason":
             "Aynı uçuş/fiyat ikinci aramada "
             "bulunamadı."
@@ -660,6 +866,7 @@ def save_verification(
     flight,
     verification
 ):
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -673,12 +880,17 @@ def save_verification(
         )
         VALUES (?, ?, ?, ?, ?)
     """, (
+
         flight["flight_key"],
+
         flight["price"],
+
         flight["currency"],
+
         int(
             verification["verified"]
         ),
+
         datetime.utcnow().isoformat()
     ))
 
@@ -693,6 +905,7 @@ def save_verification(
 def send_telegram_message(
     message
 ):
+
     token = os.getenv(
         "TELEGRAM_BOT_TOKEN"
     )
@@ -702,9 +915,11 @@ def send_telegram_message(
     )
 
     if not token or not chat_id:
+
         print(
             "Telegram bilgileri bulunamadi."
         )
+
         return False
 
     url = (
@@ -713,11 +928,14 @@ def send_telegram_message(
     )
 
     payload = {
+
         "chat_id": chat_id,
+
         "text": message
     }
 
     try:
+
         response = requests.post(
             url,
             json=payload,
@@ -725,9 +943,11 @@ def send_telegram_message(
         )
 
         if response.status_code == 200:
+
             print(
                 "Telegram bildirimi gönderildi."
             )
+
             return True
 
         print(
@@ -737,9 +957,10 @@ def send_telegram_message(
         )
 
     except Exception as e:
+
         print(
             "Telegram bağlantı hatası:",
-            e
+            repr(e)
         )
 
     return False
@@ -752,15 +973,19 @@ def send_telegram_message(
 def get_alert_level(score):
 
     if score >= 90:
+
         return "KRITIK HATA FIYATI"
 
     if score >= 85:
+
         return "HATA FIYATI ADAYI"
 
     if score >= 70:
+
         return "SUPHELI FIYAT"
 
     if score >= 50:
+
         return "IYI FIRSAT"
 
     return "NORMAL"
@@ -774,6 +999,7 @@ def alert_already_sent(
     flight_key,
     price
 ):
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -784,7 +1010,9 @@ def alert_already_sent(
           AND price = ?
         LIMIT 1
     """, (
+
         flight_key,
+
         price
     ))
 
@@ -805,22 +1033,27 @@ def create_and_send_alert(
     score_data,
     verification
 ):
+
     score = score_data["score"]
 
     if not verification["verified"]:
+
         return False
 
     if score < 50:
+
         return False
 
     if alert_already_sent(
         flight["flight_key"],
         flight["price"]
     ):
+
         print(
             "Bu fiyat için daha önce "
             "uyarı gönderilmiş."
         )
+
         return False
 
     level = get_alert_level(
@@ -840,37 +1073,53 @@ def create_and_send_alert(
     )
 
     message = (
+
         f"{level}\n\n"
-        f"Ucus: {flight['origin']} -> "
+
+        f"Ucus: "
+        f"{flight['origin']} -> "
         f"{flight['destination']}\n"
-        f"Tarih: {departure_date}\n\n"
+
+        f"Tarih: "
+        f"{departure_date}\n\n"
+
         f"Fiyat: "
         f"{flight['price']:.0f} "
         f"{flight['currency']}\n"
     )
 
     if normal_price:
+
         message += (
+
             f"Normal fiyat: "
             f"{normal_price:.0f} "
             f"{flight['currency']}\n"
+
             f"Normalden sapma: "
             f"%{drop_percent:.1f}\n"
+
             f"Gecmis veri: "
             f"{sample_count} kayit\n"
         )
 
     message += (
+
         f"\nHata Skoru: "
         f"{score:.1f}/100\n"
+
         f"Havayolu: "
         f"{flight['airline']}\n"
+
         f"Ucus No: "
         f"{flight['flight_number']}\n"
+
         f"Sure: "
         f"{flight['duration_minutes']} dk\n"
+
         f"Bagaj: "
         f"{flight['baggage']}\n"
+
         f"Dogrulama: BASARILI\n"
     )
 
@@ -879,6 +1128,7 @@ def create_and_send_alert(
     )
 
     if sent:
+
         conn = get_connection()
         cur = conn.cursor()
 
@@ -893,11 +1143,17 @@ def create_and_send_alert(
             )
             VALUES (?, ?, ?, ?, ?, ?)
         """, (
+
             flight["flight_key"],
+
             flight["price"],
+
             flight["currency"],
+
             score,
+
             level,
+
             datetime.utcnow().isoformat()
         ))
 
@@ -929,24 +1185,30 @@ def build_routes():
 
     if settings[
         "airports"
-    ]["domestic_enabled"]:
+    ]["domestic_enabled"
+    ]:
 
         for origin in origins:
+
             for destination in domestic_destinations:
 
                 if origin != destination:
+
                     routes.append(
                         (origin, destination)
                     )
 
     if settings[
         "airports"
-    ]["europe_enabled"]:
+    ]["europe_enabled"
+    ]:
 
         for origin in origins:
+
             for destination in europe_destinations:
 
                 if origin != destination:
+
                     routes.append(
                         (origin, destination)
                     )
@@ -968,18 +1230,24 @@ def main():
     routes = routes[:5]
 
     total_saved = 0
+
     total_verified = 0
+
     total_alerts = 0
 
     departure_date = (
         datetime.utcnow()
         + timedelta(days=30)
-    ).strftime("%Y-%m-%d")
+    ).strftime(
+        "%Y-%m-%d"
+    )
 
     print("=" * 60)
+
     print(
         "UCUS HATA FIYATI RADARI"
     )
+
     print("=" * 60)
 
     print(
@@ -995,7 +1263,8 @@ def main():
     for origin, destination in routes:
 
         print(
-            f"\nAraniyor: {origin} -> "
+            f"\nAraniyor: "
+            f"{origin} -> "
             f"{destination}"
         )
 
@@ -1021,9 +1290,7 @@ def main():
                     flight["origin"],
                     flight["destination"],
                     flight["currency"],
-                    current_price=flight[
-                        "price"
-                    ]
+                    current_price=flight["price"]
                 )
             )
 
@@ -1076,9 +1343,7 @@ def main():
                     verification
                 )
 
-                if verification[
-                    "verified"
-                ]:
+                if verification["verified"]:
 
                     total_verified += 1
 
@@ -1088,6 +1353,7 @@ def main():
                         score_data,
                         verification
                     ):
+
                         total_alerts += 1
 
     print(
@@ -1123,16 +1389,24 @@ def main():
 # =========================================================
 
 if __name__ == "__main__":
+
     try:
+
         main()
+
     except Exception as e:
+
         import traceback
 
         print("")
         print("=" * 60)
         print("RADAR KRITIK HATA")
         print("=" * 60)
-        print(repr(e))
+
+        print(
+            repr(e)
+        )
+
         traceback.print_exc()
 
         raise
