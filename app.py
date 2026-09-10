@@ -1,16 +1,44 @@
 import os
 import json
+import sqlite3
 import requests
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 API_KEY = os.environ.get("IGNAV_API_KEY")
 API_URL = "https://ignav.com/api"
 SETTINGS_FILE = "config/settings.json"
+DATABASE_FILE = "prices.db"
 
 
 def load_settings():
     with open(SETTINGS_FILE, "r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def create_database():
+    connection = sqlite3.connect(DATABASE_FILE)
+
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS prices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            origin TEXT NOT NULL,
+            destination TEXT NOT NULL,
+            departure_date TEXT NOT NULL,
+            price REAL,
+            currency TEXT,
+            airline TEXT,
+            flight_number TEXT,
+            duration_minutes INTEGER,
+            checked_bags INTEGER,
+            self_transfer INTEGER,
+            status TEXT,
+            source TEXT,
+            recorded_at TEXT NOT NULL
+        )
+    """)
+
+    connection.commit()
+    return connection
 
 
 def build_routes(settings):
@@ -19,23 +47,19 @@ def build_routes(settings):
     domestic = settings["airports"]["domestic_destinations"]
     europe = settings["airports"]["europe_destinations"]
 
-    # SZF -> Türkiye
     if settings["airports"]["domestic_enabled"]:
         for destination in domestic:
             if destination != "SZF":
                 routes.append(("SZF", destination))
 
-        # Türkiye -> SZF
         for origin in domestic:
             if origin != "SZF":
                 routes.append((origin, "SZF"))
 
-    # SZF -> Avrupa
     if settings["airports"]["europe_enabled"]:
         for destination in europe:
             routes.append(("SZF", destination))
 
-        # Avrupa -> SZF
         for origin in europe:
             routes.append((origin, "SZF"))
 
@@ -77,11 +101,127 @@ def search_flight(origin, destination, departure_date, settings):
     return response.json()
 
 
+def extract_flights(data):
+    if isinstance(data, list):
+        return data
+
+    if not isinstance(data, dict):
+        return []
+
+    for key in ["fares", "results", "flights", "data"]:
+        value = data.get(key)
+
+        if isinstance(value, list):
+            return value
+
+    return []
+
+
+def save_flights(connection, origin, destination, departure_date, data):
+    flights = extract_flights(data)
+
+    saved = 0
+
+    for flight in flights:
+        if not isinstance(flight, dict):
+            continue
+
+        price_info = flight.get("price", {})
+
+        if isinstance(price_info, dict):
+            price = price_info.get("amount")
+            currency = price_info.get("currency")
+            status = price_info.get("status")
+        else:
+            price = price_info
+            currency = None
+            status = None
+
+        segments = flight.get("outbound", {}).get("segments", [])
+
+        airline = None
+        flight_number = None
+        duration = None
+
+        if segments:
+            first_segment = segments[0]
+
+            airline = (
+                first_segment.get("carrier")
+                or first_segment.get("airline")
+            )
+
+            flight_number = (
+                first_segment.get("flight_number")
+                or first_segment.get("flightNumber")
+            )
+
+        duration = (
+            flight.get("outbound", {}).get("duration_minutes")
+            or flight.get("duration_minutes")
+        )
+
+        checked_bags = None
+
+        baggage = flight.get("baggage")
+
+        if isinstance(baggage, dict):
+            checked_bags = baggage.get("checked_bags")
+
+        self_transfer = flight.get(
+            "requires_self_transfer",
+            False
+        )
+
+        connection.execute("""
+            INSERT INTO prices (
+                origin,
+                destination,
+                departure_date,
+                price,
+                currency,
+                airline,
+                flight_number,
+                duration_minutes,
+                checked_bags,
+                self_transfer,
+                status,
+                source,
+                recorded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            origin,
+            destination,
+            departure_date,
+            price,
+            currency,
+            airline,
+            flight_number,
+            duration,
+            checked_bags,
+            int(bool(self_transfer)),
+            status,
+            "Ignav",
+            datetime.utcnow().isoformat()
+        ))
+
+        saved += 1
+
+    connection.commit()
+
+    return saved
+
+
 def main():
     if not API_KEY:
-        raise RuntimeError("IGNAV_API_KEY bulunamadi.")
+        raise RuntimeError(
+            "IGNAV_API_KEY bulunamadi."
+        )
 
     settings = load_settings()
+    connection = create_database()
+
     routes = build_routes(settings)
 
     departure_date = (
@@ -94,16 +234,11 @@ def main():
     print()
     print("Tarama tarihi:", departure_date)
     print("Toplam rota:", len(routes))
-    print("API butcesi:",
-          settings["system"]["api_budget_tl"], "TL")
     print()
 
-    # İlk aşamada güvenli test:
-    # Sadece ilk 5 rota taranır.
     test_routes = routes[:5]
 
-    print("Bu calismada taranacak rota:", len(test_routes))
-    print()
+    total_saved = 0
 
     for number, (origin, destination) in enumerate(
         test_routes, start=1
@@ -121,15 +256,30 @@ def main():
         )
 
         if data is not None:
-            print("  OK - veri alindi")
+            saved = save_flights(
+                connection,
+                origin,
+                destination,
+                departure_date,
+                data
+            )
+
+            total_saved += saved
+
+            print(
+                f"  OK - {saved} fiyat kaydedildi"
+            )
         else:
             print("  Veri alinamadi")
 
         print()
 
+    connection.close()
+
     print("======================================")
-    print("TARAMA TESTI TAMAMLANDI")
+    print("TARAMA TAMAMLANDI")
     print("======================================")
+    print("Kaydedilen fiyat:", total_saved)
 
 
 if __name__ == "__main__":
