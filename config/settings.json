@@ -9,8 +9,54 @@
   "airports": {
     "priority_origins": ["SZF"],
     "priority_destinations": ["SZF"],
+
     "domestic_enabled": true,
-    "europe_enabled": true
+    "europe_enabled": true,
+
+    "domestic_destinations": [
+      "IST",
+      "SAW",
+      "ESB",
+      "ADB",
+      "AYT",
+      "AYK",
+      "BJV",
+      "DLM",
+      "TZX",
+      "GZT",
+      "VAN",
+      "DIY"
+    ],
+
+    "europe_destinations": [
+      "LHR",
+      "LGW",
+      "CDG",
+      "ORY",
+      "FRA",
+      "MUC",
+      "BER",
+      "AMS",
+      "BRU",
+      "VIE",
+      "ZRH",
+      "GVA",
+      "DUS",
+      "STR",
+      "CGN",
+      "FCO",
+      "MXP",
+      "MAD",
+      "BCN",
+      "LIS",
+      "ATH",
+      "CPH",
+      "ARN",
+      "OSL",
+      "WAW",
+      "PRG",
+      "BUD"
+    ]
   },
 
   "trip": {
