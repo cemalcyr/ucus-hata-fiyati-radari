@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: ucus-hata-fiyati-panel
+    runtime: python
+    buildCommand: pip install -r panel/requirements.txt
+    startCommand: gunicorn --chdir panel app:app
