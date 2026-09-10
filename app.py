@@ -1,3 +1,4 @@
+```python
 import os
 import sqlite3
 import statistics
@@ -102,14 +103,13 @@ def ignav_search(origin, destination, departure_date):
         "children": settings["passengers"]["children"],
         "infants_in_seat": 0,
         "infants_on_lap": settings["passengers"]["infants"],
-        "cabin_class": "economy"
+        "cabin_class": "economy",
+        "max_stops": settings["connections"]["max_connections"],
+        "allow_self_transfer": settings["connections"]["self_transfer"]
     }
 
     if settings["cabin"]["business"]:
         payload["cabin_class"] = "business"
-
-    payload["max_stops"] = settings["connections"]["max_connections"]
-    payload["self_transfer"] = settings["connections"]["self_transfer"]
 
     headers = {
         "X-Api-Key": api_key,
@@ -169,9 +169,10 @@ def extract_flights(data):
             continue
 
         first_segment = segments[0]
+        last_segment = segments[-1]
 
         origin = first_segment.get("departure_airport", "")
-        destination = segments[-1].get("arrival_airport", "")
+        destination = last_segment.get("arrival_airport", "")
 
         airline = (
             outbound.get("carrier")
@@ -179,15 +180,24 @@ def extract_flights(data):
             or ""
         )
 
-        flight_number = first_segment.get("flight_number", "")
+        flight_number = first_segment.get(
+            "flight_number",
+            ""
+        )
 
-        duration = outbound.get("duration_minutes", 0)
+        duration = outbound.get(
+            "duration_minutes",
+            0
+        )
 
         baggage_info = item.get("bags", {})
         baggage_text = str(baggage_info)
 
         self_transfer = bool(
-            item.get("requires_self_transfer", False)
+            item.get(
+                "requires_self_transfer",
+                False
+            )
         )
 
         flight_key = create_flight_key(
@@ -319,7 +329,10 @@ def get_route_history(
 
     conn.close()
 
-    return [float(row[0]) for row in rows]
+    return [
+        float(row[0])
+        for row in rows
+    ]
 
 
 # =========================================================
@@ -346,16 +359,21 @@ def calculate_normal_price(
             "confidence": "yetersiz_veri"
         }
 
-    # Aşırı uç fiyatların normal fiyatı bozmasını
-    # azaltmak için medyan kullanıyoruz.
-    median_price = statistics.median(history)
+    median_price = statistics.median(
+        history
+    )
 
     return {
-        "normal_price": round(median_price, 2),
+        "normal_price": round(
+            median_price,
+            2
+        ),
         "sample_count": len(history),
         "confidence": (
-            "yuksek" if len(history) >= 20
-            else "orta" if len(history) >= 8
+            "yuksek"
+            if len(history) >= 20
+            else "orta"
+            if len(history) >= 8
             else "dusuk"
         )
     }
@@ -369,47 +387,49 @@ def calculate_market_divergence(
     current_price,
     normal_price
 ):
-    if normal_price is None or normal_price <= 0:
+    if (
+        normal_price is None
+        or normal_price <= 0
+    ):
         return {
             "drop_percent": 0,
             "market_points": 0
         }
 
-    difference = normal_price - current_price
+    difference = (
+        normal_price -
+        current_price
+    )
 
     drop_percent = (
-        difference / normal_price
+        difference /
+        normal_price
     ) * 100
 
     if drop_percent <= 0:
         points = 0
-
     elif drop_percent >= 70:
         points = 25
-
     elif drop_percent >= 60:
         points = 22
-
     elif drop_percent >= 50:
         points = 19
-
     elif drop_percent >= 40:
         points = 16
-
     elif drop_percent >= 30:
         points = 13
-
     elif drop_percent >= 20:
         points = 9
-
     elif drop_percent >= 10:
         points = 5
-
     else:
         points = 2
 
     return {
-        "drop_percent": round(drop_percent, 2),
+        "drop_percent": round(
+            drop_percent,
+            2
+        ),
         "market_points": points
     }
 
@@ -425,12 +445,11 @@ def calculate_error_score(
 ):
     score = 0
 
-    normal_price = normal_data["normal_price"]
+    normal_price = (
+        normal_data["normal_price"]
+    )
 
-    # -----------------------------------------------------
-    # 1. Tarihsel anomali - 20 puan
-    # -----------------------------------------------------
-
+    # Tarihsel anomali - 20 puan
     historical_points = 0
 
     if normal_price:
@@ -456,10 +475,7 @@ def calculate_error_score(
 
     score += historical_points
 
-    # -----------------------------------------------------
-    # 2. Market divergence - 25 puan
-    # -----------------------------------------------------
-
+    # Market divergence - 25 puan
     market = calculate_market_divergence(
         flight["price"],
         normal_price
@@ -467,13 +483,13 @@ def calculate_error_score(
 
     score += market["market_points"]
 
-    # -----------------------------------------------------
-    # 3. Ani düşüş - 10 puan
-    # -----------------------------------------------------
-
+    # Ani düşüş - 10 puan
     sudden_drop_points = 0
 
-    if previous_price and previous_price > 0:
+    if (
+        previous_price
+        and previous_price > 0
+    ):
         drop_from_previous = (
             (previous_price - flight["price"])
             / previous_price
@@ -491,14 +507,25 @@ def calculate_error_score(
     score += sudden_drop_points
 
     return {
-        "score": round(min(score, 100), 2),
+        "score": round(
+            min(score, 100),
+            2
+        ),
         "historical_points": historical_points,
-        "market_points": market["market_points"],
+        "market_points": market[
+            "market_points"
+        ],
         "sudden_drop_points": sudden_drop_points,
         "normal_price": normal_price,
-        "drop_percent": market["drop_percent"],
-        "sample_count": normal_data["sample_count"],
-        "confidence": normal_data["confidence"]
+        "drop_percent": market[
+            "drop_percent"
+        ],
+        "sample_count": normal_data[
+            "sample_count"
+        ],
+        "confidence": normal_data[
+            "confidence"
+        ]
     }
 
 
@@ -545,7 +572,10 @@ def get_previous_route_price(
 # DOĞRULAMA
 # =========================================================
 
-def verify_flight(flight, departure_date):
+def verify_flight(
+    flight,
+    departure_date
+):
     data = ignav_search(
         flight["origin"],
         flight["destination"],
@@ -561,44 +591,49 @@ def verify_flight(flight, departure_date):
     flights = extract_flights(data)
 
     for item in flights:
-        if item["flight_key"] != flight["flight_key"]:
+
+        if (
+            item["flight_key"]
+            != flight["flight_key"]
+        ):
             continue
 
         price_match = (
             abs(
-                item["price"] -
-                flight["price"]
+                item["price"]
+                - flight["price"]
             ) < 0.01
         )
 
         currency_match = (
-            item["currency"] ==
-            flight["currency"]
+            item["currency"]
+            == flight["currency"]
         )
 
         self_transfer_match = (
-            item["self_transfer"] ==
-            flight["self_transfer"]
+            item["self_transfer"]
+            == flight["self_transfer"]
         )
 
-        verified_status = True
-
-        # Fiyat ve temel uçuş bilgileri aynı olmalı.
         if (
             price_match
             and currency_match
             and self_transfer_match
         ):
             return {
-                "verified": verified_status,
+                "verified": True,
                 "price": item["price"],
                 "currency": item["currency"],
-                "reason": "Aynı uçuş ve aynı fiyat ikinci aramada görüldü."
+                "reason":
+                    "Aynı uçuş ve aynı fiyat "
+                    "ikinci aramada görüldü."
             }
 
     return {
         "verified": False,
-        "reason": "Aynı uçuş/fiyat ikinci aramada bulunamadı."
+        "reason":
+            "Aynı uçuş/fiyat ikinci aramada "
+            "bulunamadı."
     }
 
 
@@ -626,7 +661,9 @@ def save_verification(
         flight["flight_key"],
         flight["price"],
         flight["currency"],
-        int(verification["verified"]),
+        int(
+            verification["verified"]
+        ),
         datetime.utcnow().isoformat()
     ))
 
@@ -638,16 +675,25 @@ def save_verification(
 # TELEGRAM
 # =========================================================
 
-def send_telegram_message(message):
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+def send_telegram_message(
+    message
+):
+    token = os.getenv(
+        "TELEGRAM_BOT_TOKEN"
+    )
+
+    chat_id = os.getenv(
+        "TELEGRAM_CHAT_ID"
+    )
 
     if not token or not chat_id:
-        print("Telegram bilgileri bulunamadi.")
+        print(
+            "Telegram bilgileri bulunamadi."
+        )
         return False
 
     url = (
-        f"https://api.telegram.org/bot"
+        "https://api.telegram.org/bot"
         f"{token}/sendMessage"
     )
 
@@ -664,7 +710,9 @@ def send_telegram_message(message):
         )
 
         if response.status_code == 200:
-            print("Telegram bildirimi gönderildi.")
+            print(
+                "Telegram bildirimi gönderildi."
+            )
             return True
 
         print(
@@ -674,7 +722,10 @@ def send_telegram_message(message):
         )
 
     except Exception as e:
-        print("Telegram bağlantı hatası:", e)
+        print(
+            "Telegram bağlantı hatası:",
+            e
+        )
 
     return False
 
@@ -684,6 +735,7 @@ def send_telegram_message(message):
 # =========================================================
 
 def get_alert_level(score):
+
     if score >= 90:
         return "🔴 KRİTİK HATA FİYATI"
 
@@ -750,41 +802,66 @@ def create_and_send_alert(
         flight["flight_key"],
         flight["price"]
     ):
-        print("Bu fiyat için daha önce uyarı gönderilmiş.")
+        print(
+            "Bu fiyat için daha önce "
+            "uyarı gönderilmiş."
+        )
         return False
 
-    level = get_alert_level(score)
+    level = get_alert_level(
+        score
+    )
 
-    normal_price = score_data["normal_price"]
-    drop_percent = score_data["drop_percent"]
-    sample_count = score_data["sample_count"]
+    normal_price = (
+        score_data["normal_price"]
+    )
+
+    drop_percent = (
+        score_data["drop_percent"]
+    )
+
+    sample_count = (
+        score_data["sample_count"]
+    )
 
     message = (
         f"{level}\n\n"
-        f"✈️ {flight['origin']} → {flight['destination']}\n"
+        f"✈️ {flight['origin']} → "
+        f"{flight['destination']}\n"
         f"📅 {departure_date}\n\n"
-        f"💰 Fiyat: {flight['price']:.0f} "
+        f"💰 Fiyat: "
+        f"{flight['price']:.0f} "
         f"{flight['currency']}\n"
     )
 
     if normal_price:
         message += (
-            f"📊 Normal fiyat: {normal_price:.0f} "
+            f"📊 Normal fiyat: "
+            f"{normal_price:.0f} "
             f"{flight['currency']}\n"
-            f"📉 Normalden sapma: %{drop_percent:.1f}\n"
-            f"🧠 Geçmiş veri: {sample_count} kayıt\n"
+            f"📉 Normalden sapma: "
+            f"%{drop_percent:.1f}\n"
+            f"🧠 Geçmiş veri: "
+            f"{sample_count} kayıt\n"
         )
 
     message += (
-        f"\n🎯 Hata Skoru: {score:.1f}/100\n"
-        f"✈️ Havayolu: {flight['airline']}\n"
-        f"🔢 Uçuş: {flight['flight_number']}\n"
-        f"⏱️ Süre: {flight['duration_minutes']} dk\n"
-        f"🧳 Bagaj: {flight['baggage']}\n"
+        f"\n🎯 Hata Skoru: "
+        f"{score:.1f}/100\n"
+        f"✈️ Havayolu: "
+        f"{flight['airline']}\n"
+        f"🔢 Uçuş: "
+        f"{flight['flight_number']}\n"
+        f"⏱️ Süre: "
+        f"{flight['duration_minutes']} dk\n"
+        f"🧳 Bagaj: "
+        f"{flight['baggage']}\n"
         f"🔎 Doğrulama: BAŞARILI\n"
     )
 
-    sent = send_telegram_message(message)
+    sent = send_telegram_message(
+        message
+    )
 
     if sent:
         conn = get_connection()
@@ -820,23 +897,40 @@ def create_and_send_alert(
 # =========================================================
 
 def build_routes():
+
     routes = []
 
-    origins = settings["airports"]["priority_origins"]
-    domestic_destinations = settings["airports"]["domestic_destinations"]
-    europe_destinations = settings["airports"]["europe_destinations"]
+    origins = settings[
+        "airports"
+    ]["priority_origins"]
 
-    if settings["airports"]["domestic_enabled"]:
+    domestic_destinations = settings[
+        "airports"
+    ]["domestic_destinations"]
+
+    europe_destinations = settings[
+        "airports"
+    ]["europe_destinations"]
+
+    if settings[
+        "airports"
+    ]["domestic_enabled"]:
+
         for origin in origins:
             for destination in domestic_destinations:
+
                 if origin != destination:
                     routes.append(
                         (origin, destination)
                     )
 
-    if settings["airports"]["europe_enabled"]:
+    if settings[
+        "airports"
+    ]["europe_enabled"]:
+
         for origin in origins:
             for destination in europe_destinations:
+
                 if origin != destination:
                     routes.append(
                         (origin, destination)
@@ -850,6 +944,7 @@ def build_routes():
 # =========================================================
 
 def main():
+
     init_db()
 
     routes = build_routes()
@@ -862,26 +957,31 @@ def main():
     total_alerts = 0
 
     departure_date = (
-        datetime.utcnow() +
-        timedelta(days=30)
+        datetime.utcnow()
+        + timedelta(days=30)
     ).strftime("%Y-%m-%d")
 
     print("=" * 60)
-    print("UCUS HATA FIYATI RADARI")
+    print(
+        "UCUS HATA FIYATI RADARI"
+    )
     print("=" * 60)
 
     print(
-        f"Taranan rota sayisi: {len(routes)}"
+        f"Taranan rota sayisi: "
+        f"{len(routes)}"
     )
 
     print(
-        f"Arama tarihi: {departure_date}"
+        f"Arama tarihi: "
+        f"{departure_date}"
     )
 
     for origin, destination in routes:
 
         print(
-            f"\n🔎 {origin} -> {destination}"
+            f"\n🔎 {origin} -> "
+            f"{destination}"
         )
 
         data = ignav_search(
@@ -890,33 +990,43 @@ def main():
             departure_date
         )
 
-        flights = extract_flights(data)
+        flights = extract_flights(
+            data
+        )
 
         print(
-            f"Bulunan uçuş: {len(flights)}"
+            f"Bulunan uçuş: "
+            f"{len(flights)}"
         )
 
         for flight in flights:
 
-            # Önce geçmişe bak.
-            normal_data = calculate_normal_price(
-                flight["origin"],
-                flight["destination"],
-                flight["currency"],
-                current_price=flight["price"]
+            normal_data = (
+                calculate_normal_price(
+                    flight["origin"],
+                    flight["destination"],
+                    flight["currency"],
+                    current_price=flight[
+                        "price"
+                    ]
+                )
             )
 
-            previous_price = get_previous_route_price(
-                flight["origin"],
-                flight["destination"],
-                flight["currency"],
-                flight["price"]
+            previous_price = (
+                get_previous_route_price(
+                    flight["origin"],
+                    flight["destination"],
+                    flight["currency"],
+                    flight["price"]
+                )
             )
 
-            score_data = calculate_error_score(
-                flight,
-                normal_data,
-                previous_price
+            score_data = (
+                calculate_error_score(
+                    flight,
+                    normal_data,
+                    previous_price
+                )
             )
 
             print(
@@ -930,7 +1040,6 @@ def main():
                 f"{score_data['score']}"
             )
 
-            # Fiyatı geçmişe kaydet.
             save_flight(
                 flight,
                 departure_date
@@ -938,13 +1047,13 @@ def main():
 
             total_saved += 1
 
-            # Şimdilik sadece anlamlı adayları
-            # ikinci kez doğruluyoruz.
             if score_data["score"] >= 30:
 
-                verification = verify_flight(
-                    flight,
-                    departure_date
+                verification = (
+                    verify_flight(
+                        flight,
+                        departure_date
+                    )
                 )
 
                 save_verification(
@@ -952,7 +1061,10 @@ def main():
                     verification
                 )
 
-                if verification["verified"]:
+                if verification[
+                    "verified"
+                ]:
+
                     total_verified += 1
 
                     if create_and_send_alert(
@@ -963,22 +1075,34 @@ def main():
                     ):
                         total_alerts += 1
 
-    print("\n" + "=" * 60)
-    print("TARAMA TAMAMLANDI")
-    print("=" * 60)
-
     print(
-        f"Kaydedilen fiyat: {total_saved}"
+        "\n" + "=" * 60
     )
 
     print(
-        f"Doğrulanan uçuş: {total_verified}"
+        "TARAMA TAMAMLANDI"
     )
 
     print(
-        f"Gönderilen Telegram uyarısı: {total_alerts}"
+        "=" * 60
+    )
+
+    print(
+        f"Kaydedilen fiyat: "
+        f"{total_saved}"
+    )
+
+    print(
+        f"Doğrulanan uçuş: "
+        f"{total_verified}"
+    )
+
+    print(
+        f"Gönderilen Telegram uyarısı: "
+        f"{total_alerts}"
     )
 
 
 if __name__ == "__main__":
     main()
+```
