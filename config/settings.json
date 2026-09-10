@@ -5,14 +5,15 @@
     "api_budget_tl": 0,
     "paid_api_allowed": false
   },
-
   "airports": {
-    "priority_origins": ["SZF"],
-    "priority_destinations": ["SZF"],
-
+    "priority_origins": [
+      "SZF"
+    ],
+    "priority_destinations": [
+      "SZF"
+    ],
     "domestic_enabled": true,
     "europe_enabled": true,
-
     "domestic_destinations": [
       "IST",
       "SAW",
@@ -27,7 +28,6 @@
       "VAN",
       "DIY"
     ],
-
     "europe_destinations": [
       "LHR",
       "LGW",
@@ -58,23 +58,19 @@
       "BUD"
     ]
   },
-
   "trip": {
     "one_way": true,
     "round_trip": true
   },
-
   "passengers": {
     "adults": 1,
     "children": 0,
     "infants": 0
   },
-
   "cabin": {
     "economy": true,
     "business": false
   },
-
   "connections": {
     "direct": true,
     "one_connection": true,
@@ -83,23 +79,19 @@
     "self_transfer": false,
     "airport_change_warning": true
   },
-
   "baggage": {
     "show_included": true,
     "prefer_checked_baggage": true
   },
-
   "price": {
     "maximum_try": 0,
     "compare_total_price": true,
     "include_taxes": true,
     "include_mandatory_fees": true
   },
-
   "airlines": {
     "disabled": []
   },
-
   "scoring": {
     "error_score": {
       "historical_anomaly": 20,
@@ -112,7 +104,6 @@
       "short_lived_persistence": 5,
       "source_reliability": 5
     },
-
     "thresholds": {
       "normal": 30,
       "good_deal": 50,
@@ -121,10 +112,9 @@
       "high_confidence": 90
     }
   },
-
   "alerts": {
     "enabled": true,
-    "telegram_enabled": false,
+    "telegram_enabled": true,
     "critical_override_quiet_hours": true
   }
 }
