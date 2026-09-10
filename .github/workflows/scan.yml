@@ -1,0 +1,27 @@
+name: Ucus Hata Fiyati Radari
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kodu indir
+        uses: actions/checkout@v4
+
+      - name: Python kurulumu
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bagimliliklari kur
+        run: pip install -r requirements.txt
+
+      - name: Radari calistir
+        env:
+          IGNAV_API_KEY: ${{ secrets.IGNAV_API_KEY }}
+        run: python app.py
