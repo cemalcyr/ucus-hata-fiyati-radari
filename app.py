@@ -1,4 +1,3 @@
-```python
 import os
 import sqlite3
 import statistics
@@ -131,13 +130,14 @@ def ignav_search(origin, destination, departure_date):
         )
 
         if response.status_code != 200:
-            print(response.text[:500])
+            print("Ignav API cevabi:")
+            print(response.text[:1000])
             return None
 
         return response.json()
 
     except Exception as e:
-        print("Ignav hatasi:", e)
+        print("Ignav hatasi:", repr(e))
         return None
 
 
@@ -171,12 +171,21 @@ def extract_flights(data):
         first_segment = segments[0]
         last_segment = segments[-1]
 
-        origin = first_segment.get("departure_airport", "")
-        destination = last_segment.get("arrival_airport", "")
+        origin = first_segment.get(
+            "departure_airport",
+            ""
+        )
+
+        destination = last_segment.get(
+            "arrival_airport",
+            ""
+        )
 
         airline = (
             outbound.get("carrier")
-            or first_segment.get("marketing_carrier_code")
+            or first_segment.get(
+                "marketing_carrier_code"
+            )
             or ""
         )
 
@@ -190,8 +199,14 @@ def extract_flights(data):
             0
         )
 
-        baggage_info = item.get("bags", {})
-        baggage_text = str(baggage_info)
+        baggage_info = item.get(
+            "bags",
+            {}
+        )
+
+        baggage_text = str(
+            baggage_info
+        )
 
         self_transfer = bool(
             item.get(
@@ -737,18 +752,18 @@ def send_telegram_message(
 def get_alert_level(score):
 
     if score >= 90:
-        return "🔴 KRİTİK HATA FİYATI"
+        return "KRITIK HATA FIYATI"
 
     if score >= 85:
-        return "🔴 HATA FİYATI ADAYI"
+        return "HATA FIYATI ADAYI"
 
     if score >= 70:
-        return "🟠 ŞÜPHELİ FİYAT"
+        return "SUPHELI FIYAT"
 
     if score >= 50:
-        return "🟡 İYİ FIRSAT"
+        return "IYI FIRSAT"
 
-    return "⚪ NORMAL"
+    return "NORMAL"
 
 
 # =========================================================
@@ -826,37 +841,37 @@ def create_and_send_alert(
 
     message = (
         f"{level}\n\n"
-        f"✈️ {flight['origin']} → "
+        f"Ucus: {flight['origin']} -> "
         f"{flight['destination']}\n"
-        f"📅 {departure_date}\n\n"
-        f"💰 Fiyat: "
+        f"Tarih: {departure_date}\n\n"
+        f"Fiyat: "
         f"{flight['price']:.0f} "
         f"{flight['currency']}\n"
     )
 
     if normal_price:
         message += (
-            f"📊 Normal fiyat: "
+            f"Normal fiyat: "
             f"{normal_price:.0f} "
             f"{flight['currency']}\n"
-            f"📉 Normalden sapma: "
+            f"Normalden sapma: "
             f"%{drop_percent:.1f}\n"
-            f"🧠 Geçmiş veri: "
-            f"{sample_count} kayıt\n"
+            f"Gecmis veri: "
+            f"{sample_count} kayit\n"
         )
 
     message += (
-        f"\n🎯 Hata Skoru: "
+        f"\nHata Skoru: "
         f"{score:.1f}/100\n"
-        f"✈️ Havayolu: "
+        f"Havayolu: "
         f"{flight['airline']}\n"
-        f"🔢 Uçuş: "
+        f"Ucus No: "
         f"{flight['flight_number']}\n"
-        f"⏱️ Süre: "
+        f"Sure: "
         f"{flight['duration_minutes']} dk\n"
-        f"🧳 Bagaj: "
+        f"Bagaj: "
         f"{flight['baggage']}\n"
-        f"🔎 Doğrulama: BAŞARILI\n"
+        f"Dogrulama: BASARILI\n"
     )
 
     sent = send_telegram_message(
@@ -980,7 +995,7 @@ def main():
     for origin, destination in routes:
 
         print(
-            f"\n🔎 {origin} -> "
+            f"\nAraniyor: {origin} -> "
             f"{destination}"
         )
 
@@ -995,7 +1010,7 @@ def main():
         )
 
         print(
-            f"Bulunan uçuş: "
+            f"Bulunan ucus: "
             f"{len(flights)}"
         )
 
@@ -1093,16 +1108,31 @@ def main():
     )
 
     print(
-        f"Doğrulanan uçuş: "
+        f"Dogrulanan ucus: "
         f"{total_verified}"
     )
 
     print(
-        f"Gönderilen Telegram uyarısı: "
+        f"Gonderilen Telegram uyarisi: "
         f"{total_alerts}"
     )
 
 
+# =========================================================
+# PROGRAMI BASLAT
+# =========================================================
+
 if __name__ == "__main__":
-    main()
-```
+    try:
+        main()
+    except Exception as e:
+        import traceback
+
+        print("")
+        print("=" * 60)
+        print("RADAR KRITIK HATA")
+        print("=" * 60)
+        print(repr(e))
+        traceback.print_exc()
+
+        raise
