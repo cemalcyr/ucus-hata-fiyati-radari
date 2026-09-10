@@ -117,80 +117,88 @@ def extract_flights(data):
     return []
 
 
-def save_flights(connection, origin, destination, departure_date, data):
-    flights = extract_flights(data)
+def get_price(flight):
+    price_info = flight.get("price", {})
 
-    saved = 0
+    if isinstance(price_info, dict):
+        return price_info.get("amount")
 
-    for flight in flights:
-        if not isinstance(flight, dict):
-            continue
+    if isinstance(price_info, (int, float)):
+        return price_info
 
-        price_info = flight.get("price", {})
+    return None
 
-        if isinstance(price_info, dict):
-            price = price_info.get("amount")
-            currency = price_info.get("currency")
-            status = price_info.get("status")
-        else:
-            price = price_info
-            currency = None
-            status = None
 
-        segments = flight.get("outbound", {}).get("segments", [])
+def get_currency(flight):
+    price_info = flight.get("price", {})
 
-        airline = None
-        flight_number = None
-        duration = None
+    if isinstance(price_info, dict):
+        return price_info.get("currency")
 
-        if segments:
-            first_segment = segments[0]
+    return None
 
-            airline = (
-                first_segment.get("carrier")
-                or first_segment.get("airline")
-            )
 
-            flight_number = (
-                first_segment.get("flight_number")
-                or first_segment.get("flightNumber")
-            )
+def get_airline(flight):
+    segments = flight.get("outbound", {}).get("segments", [])
 
-        duration = (
-            flight.get("outbound", {}).get("duration_minutes")
-            or flight.get("duration_minutes")
-        )
+    if not segments:
+        return None
 
-        checked_bags = None
+    first = segments[0]
 
-        baggage = flight.get("baggage")
+    return (
+        first.get("carrier")
+        or first.get("airline")
+    )
 
-        if isinstance(baggage, dict):
-            checked_bags = baggage.get("checked_bags")
 
-        self_transfer = flight.get(
-            "requires_self_transfer",
-            False
-        )
+def get_flight_number(flight):
+    segments = flight.get("outbound", {}).get("segments", [])
 
-        connection.execute("""
-            INSERT INTO prices (
-                origin,
-                destination,
-                departure_date,
-                price,
-                currency,
-                airline,
-                flight_number,
-                duration_minutes,
-                checked_bags,
-                self_transfer,
-                status,
-                source,
-                recorded_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
+    if not segments:
+        return None
+
+    first = segments[0]
+
+    return (
+        first.get("flight_number")
+        or first.get("flightNumber")
+    )
+
+
+def get_duration(flight):
+    outbound = flight.get("outbound", {})
+
+    return (
+        outbound.get("duration_minutes")
+        or flight.get("duration_minutes")
+    )
+
+
+def get_checked_bags(flight):
+    baggage = flight.get("baggage")
+
+    if isinstance(baggage, dict):
+        return baggage.get("checked_bags")
+
+    return None
+
+
+def get_self_transfer(flight):
+    return bool(
+        flight.get("requires_self_transfer", False)
+    )
+
+
+def save_flight(
+    connection,
+    origin,
+    destination,
+    departure_date,
+    flight
+):
+    connection.execute("""
+        INSERT INTO prices (
             origin,
             destination,
             departure_date,
@@ -198,19 +206,105 @@ def save_flights(connection, origin, destination, departure_date, data):
             currency,
             airline,
             flight_number,
-            duration,
+            duration_minutes,
             checked_bags,
-            int(bool(self_transfer)),
+            self_transfer,
             status,
-            "Ignav",
-            datetime.utcnow().isoformat()
-        ))
-
-        saved += 1
+            source,
+            recorded_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        origin,
+        destination,
+        departure_date,
+        get_price(flight),
+        get_currency(flight),
+        get_airline(flight),
+        get_flight_number(flight),
+        get_duration(flight),
+        get_checked_bags(flight),
+        int(get_self_transfer(flight)),
+        flight.get("price", {}).get("status")
+        if isinstance(flight.get("price"), dict)
+        else None,
+        "Ignav",
+        datetime.utcnow().isoformat()
+    ))
 
     connection.commit()
 
-    return saved
+
+def calculate_error_score(
+    connection,
+    origin,
+    destination,
+    departure_date,
+    current_price
+):
+    if current_price is None or current_price <= 0:
+        return 0, 0, None
+
+    cursor = connection.execute("""
+        SELECT price
+        FROM prices
+        WHERE origin = ?
+          AND destination = ?
+          AND departure_date = ?
+          AND price IS NOT NULL
+          AND price > 0
+        ORDER BY id DESC
+        LIMIT 100
+    """, (
+        origin,
+        destination,
+        departure_date
+    ))
+
+    rows = cursor.fetchall()
+
+    prices = [
+        float(row[0])
+        for row in rows
+    ]
+
+    # Mevcut taramayı geçmiş karşılaştırmasına
+    # dahil etmeden önce yeterli geçmiş var mı?
+    if len(prices) < 2:
+        return 0, 0, None
+
+    average_price = sum(prices) / len(prices)
+
+    minimum_price = min(prices)
+
+    if average_price <= 0:
+        return 0, 0, None
+
+    drop_percent = (
+        (average_price - current_price)
+        / average_price
+    ) * 100
+
+    # Sadece fiyat düşüşüne dayalı ilk skor.
+    # Diğer puanlar sonraki aşamalarda eklenecek.
+    historical_score = min(
+        20,
+        max(
+            0,
+            drop_percent * 0.5
+        )
+    )
+
+    error_score = round(
+        historical_score,
+        1
+    )
+
+    return (
+        error_score,
+        round(drop_percent, 1),
+        round(average_price, 2)
+    )
 
 
 def main():
@@ -236,12 +330,14 @@ def main():
     print("Toplam rota:", len(routes))
     print()
 
+    # Şimdilik API tüketimini düşük tutuyoruz.
     test_routes = routes[:5]
 
     total_saved = 0
 
     for number, (origin, destination) in enumerate(
-        test_routes, start=1
+        test_routes,
+        start=1
     ):
         print(
             f"[{number}/{len(test_routes)}] "
@@ -255,22 +351,63 @@ def main():
             settings
         )
 
-        if data is not None:
-            saved = save_flights(
+        if data is None:
+            print("  Veri alinamadi")
+            print()
+            continue
+
+        flights = extract_flights(data)
+
+        print(
+            "  Bulunan ucus:",
+            len(flights)
+        )
+
+        for flight in flights:
+            price = get_price(flight)
+
+            if price is None:
+                continue
+
+            currency = get_currency(flight)
+
+            # Şimdilik yalnızca TRY fiyatlarını
+            # doğrudan karşılaştırıyoruz.
+            if currency != "TRY":
+                continue
+
+            error_score, drop_percent, average_price = (
+                calculate_error_score(
+                    connection,
+                    origin,
+                    destination,
+                    departure_date,
+                    price
+                )
+            )
+
+            save_flight(
                 connection,
                 origin,
                 destination,
                 departure_date,
-                data
+                flight
             )
 
-            total_saved += saved
+            total_saved += 1
 
             print(
-                f"  OK - {saved} fiyat kaydedildi"
+                f"  {origin}->{destination} "
+                f"{price:.0f} {currency} | "
+                f"Error Score: {error_score}/100"
             )
-        else:
-            print("  Veri alinamadi")
+
+            if average_price is not None:
+                print(
+                    f"  Normal ortalama: "
+                    f"{average_price:.0f} TRY | "
+                    f"Dusus: {drop_percent}%"
+                )
 
         print()
 
@@ -280,6 +417,8 @@ def main():
     print("TARAMA TAMAMLANDI")
     print("======================================")
     print("Kaydedilen fiyat:", total_saved)
+    print()
+    print("Error Score motoru aktif.")
 
 
 if __name__ == "__main__":
