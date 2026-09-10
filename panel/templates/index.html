@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Uçuş Hata Fiyatı Radarı</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f4f6f8;
+            color: #17202a;
+        }
+
+        .header {
+            background: #111827;
+            color: white;
+            padding: 24px;
+        }
+
+        .header-content {
+            max-width: 1400px;
+            margin: auto;
+        }
+
+        .header h1 {
+            margin: 0 0 8px;
+            font-size: 28px;
+        }
+
+        .header p {
+            margin: 0;
+            color: #cbd5e1;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 25px auto;
+            padding: 0 18px;
+        }
+
+        .status {
+            background: white;
+            border-radius: 12px;
+            padding: 18px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .online {
+            color: #16803c;
+            font-weight: bold;
+        }
+
+        .offline {
+            color: #b42318;
+            font-weight: bold;
+        }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 16px;
+            margin-bottom: 25px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+
+        .card-title {
+            color: #64748b;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+
+        .card-value {
+            font-size: 28px;
+            font-weight: bold;
+        }
+
+        .section {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 25px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+
+        .section h2 {
+            margin-top: 0;
+            margin-bottom: 18px;
+        }
+
+        .table-wrapper {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 900px;
+        }
+
+        th,
+        td {
+            padding: 12px 10px;
+            border-bottom: 1px solid #e5e7eb;
+            text-align: left;
+            white-space: nowrap;
+        }
+
+        th {
+            background: #f8fafc;
+            color: #475569;
+            font-size: 13px;
+        }
+
+        td {
+            font-size: 14px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 5px 9px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .verified {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .waiting {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .empty {
+            padding: 30px;
+            text-align: center;
+            color: #64748b;
+        }
+
+        .error {
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .footer {
+            text-align: center;
+            color: #64748b;
+            padding: 25px;
+            font-size: 13px;
+        }
+
+        @media (max-width: 1100px) {
+            .cards {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+
+        @media (max-width: 700px) {
+            .cards {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .header h1 {
+                font-size: 23px;
+            }
+
+            .card-value {
+                font-size: 22px;
+            }
+        }
+
+        @media (max-width: 450px) {
+            .cards {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<header class="header">
+    <div class="header-content">
+        <h1>✈️ Uçuş Hata Fiyatı Radarı</h1>
+        <p>V3.4 — Gerçek zamanlı hata fiyatı takip paneli</p>
+    </div>
+</header>
+
+<main class="container">
+
+    <div class="status">
+        <div class="status-row">
+            <div>
+                Sistem durumu:
+                {% if data.available %}
+                    <span class="online">● AKTİF</span>
+                {% else %}
+                    <span class="offline">● VERİTABANI HATASI</span>
+                {% endif %}
+            </div>
+
+            <div>
+                Son görüntüleme:
+                <strong>{{ updated_at }}</strong>
+            </div>
+        </div>
+    </div>
+
+    {% if data.message %}
+        <div class="section">
+            <div class="error">
+                {{ data.message }}
+            </div>
+        </div>
+    {% endif %}
+
+    <div class="cards">
+
+        <div class="card">
+            <div class="card-title">Toplam Kayıt</div>
+            <div class="card-value">
+                {{ stats.total }}
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Doğrulanan</div>
+            <div class="card-value">
+                {{ stats.verified }}
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">En İyi Skor</div>
+            <div class="card-value">
+                {{ "%.0f"|format(stats.best_score) }}
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">En İyi Fırsat</div>
+            <div class="card-value">
+                {{ "%.0f"|format(stats.best_opportunity) }}
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">En Düşük Fiyat</div>
+            <div class="card-value">
+                {% if stats.lowest_price is not none %}
+                    {{ "{:,.0f}".format(stats.lowest_price).replace(",", ".") }} TL
+                {% else %}
+                    -
+                {% endif %}
+            </div>
+        </div>
+
+    </div>
+
+    <div class="section">
+
+        <h2>Son Fiyat Kayıtları</h2>
+
+        {% if data.rows %}
+
+            <div class="table-wrapper">
+
+                <table>
+
+                    <thead>
+                        <tr>
+                            {% for column in data.columns %}
+                                <th>{{ column }}</th>
+                            {% endfor %}
+                        </tr>
+                    </thead>
+
+                    <tbody>
+
+                        {% for row in data.rows %}
+
+                            <tr>
+
+                                {% for column in data.columns %}
+
+                                    <td>
+
+                                        {% set value = row[column] %}
+
+                                        {% if column.lower() in [
+                                            "status",
+                                            "verification_status",
+                                            "verify_status",
+                                            "durum"
+                                        ] %}
+
+                                            {% if value and (
+                                                "dogrulan" in value|string|lower
+                                                or "verified" in value|string|lower
+                                                or "confirmed" in value|string|lower
+                                            ) %}
+
+                                                <span class="badge verified">
+                                                    {{ value }}
+                                                </span>
+
+                                            {% else %}
+
+                                                <span class="badge waiting">
+                                                    {{ value if value else "-" }}
+                                                </span>
+
+                                            {% endif %}
+
+                                        {% else %}
+
+                                            {{ value if value is not none else "-" }}
+
+                                        {% endif %}
+
+                                    </td>
+
+                                {% endfor %}
+
+                            </tr>
+
+                        {% endfor %}
+
+                    </tbody>
+
+                </table>
+
+            </div>
+
+        {% else %}
+
+            <div class="empty">
+                Henüz gösterilecek fiyat kaydı bulunmuyor.
+            </div>
+
+        {% endif %}
+
+    </div>
+
+</main>
+
+<footer class="footer">
+    Uçuş Hata Fiyatı Radarı V3.4
+</footer>
+
+</body>
+</html>
