@@ -266,6 +266,11 @@ def init_db():
 # API BUTCESI / SAYAC
 # ============================================================
 
+# IGNAV 402 (billing_required) alindiginda bu calisma boyunca yeni
+# API istegi gonderilmez. Boylece kota bittiginde ayni istegi tekrar
+# tekrar deneyerek gereksiz trafik ve uzun calisma olusmasi engellenir.
+IGNAV_BILLING_BLOCKED = False
+
 def api_budget():
     system = settings.get("system", {})
     return {
@@ -413,9 +418,18 @@ def common_payload(origin, destination, departure_date):
 
 
 def ignav_post(endpoint, payload):
+    global IGNAV_BILLING_BLOCKED
+
     headers = ignav_headers()
     if not headers:
         print("IGNAV_API_KEY bulunamadi.")
+        return None
+
+    # Bir onceki IGNAV istegi 402 billing_required verdiyse bu calisma
+    # boyunca yeni istek gonderme. Ucretsiz kota bittiginde 402 kalici
+    # bir durumdur; retry yapmak fayda saglamaz.
+    if IGNAV_BILLING_BLOCKED:
+        print("IGNAV 402: faturalandirma gerekli; bu calisma icin API durduruldu.")
         return None
 
     if not api_call_allowed():
@@ -436,17 +450,38 @@ def ignav_post(endpoint, payload):
             print(f"Ignav {endpoint}: HTTP {response.status_code}")
 
             if ok:
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError as exc:
+                    print("Ignav JSON hatasi:", repr(exc))
+                    return None
+
+            if response.status_code == 402:
+                IGNAV_BILLING_BLOCKED = True
+                print("IGNAV 402: billing_required. Yeni API istekleri bu calisma icin durduruldu.")
+                print("Ignav cevabi:", response.text[:500])
+                return None
 
             print("Ignav cevabi:", response.text[:500])
+
+            # 4xx kalici hatalarda retry yapma. Yalnizca gecici HTTP
+            # durumlari ve baglanti hatalari tekrar denenebilir.
+            if response.status_code not in (408, 429, 500, 502, 503, 504):
+                print("Ignav kalici hata, tekrar denenmeyecek.")
+                return None
+
             if attempt < 3:
                 time.sleep(attempt * 2)
 
-        except Exception as exc:
+        except (requests.Timeout, requests.ConnectionError) as exc:
             record_api_call(endpoint, False)
-            print("Ignav hata:", repr(exc))
+            print(f"Ignav gecici baglanti hatasi ({attempt}/3):", repr(exc))
             if attempt < 3:
                 time.sleep(attempt * 2)
+        except Exception as exc:
+            record_api_call(endpoint, False)
+            print("Ignav beklenmeyen hata:", repr(exc))
+            return None
 
     return None
 
@@ -1417,7 +1452,7 @@ def create_and_send_alert(flight, score, opportunity, verification):
 
 def main():
     print("=" * 60)
-    print("UÃ‡UÅ HATA FÄ°YATI RADARI V3.4")
+    print("UÃ‡UÅ HATA FÄ°YATI RADARI V3.5")
     print("=" * 60)
 
     init_db()
@@ -1572,13 +1607,14 @@ def main():
                         alerts += 1
 
     print("\n" + "=" * 60)
-    print("V3.4 CALISMA OZETI")
+    print("V3.5 CALISMA OZETI")
     print("=" * 60)
     print(f"API aramasi: {searches}")
     print(f"Ucus/itinerary: {flights_found}")
     print(f"Dogrulama: {verified}")
     print(f"Booking kontrolu: {booking_checks}")
     print(f"Telegram alarmi: {alerts}")
+    print("IGNAV faturalandirma durumu:", "GEREKLI - 402" if IGNAV_BILLING_BLOCKED else "NORMAL")
     if telegram_test_result is not None:
         print("Telegram test:", "BASARILI" if telegram_test_result else "BASARISIZ")
     print("=" * 60)
