@@ -535,7 +535,6 @@ def extract_flights(data):
         return []
 
     results = []
-
     seen = set()
 
     for item in itineraries:
@@ -673,8 +672,6 @@ def extract_flights(data):
             duration
         )
 
-        # Ayni aramadaki birebir
-        # tekrarları temizle.
         duplicate_key = (
             flight_key,
             round(
@@ -724,8 +721,6 @@ def save_flight(
 
     timestamp = utc_now_iso()
 
-    # Ayni calismada ayni ucus/fiyat
-    # tekrar tekrar yazilmasin.
     cur.execute(
         """
         SELECT id
@@ -921,7 +916,62 @@ def calculate_normal_price(
 
 
 # ============================================================
-# SKOR
+# ANI DUSUS
+# ============================================================
+
+def calculate_sudden_drop(
+    current_price,
+    previous_price
+):
+
+    if (
+        previous_price is None
+        or previous_price <= 0
+    ):
+
+        return {
+            "drop_percent": 0,
+            "points": 0
+        }
+
+    drop = (
+        (
+            previous_price -
+            current_price
+        )
+        /
+        previous_price
+    ) * 100
+
+    if drop <= 0:
+        points = 0
+
+    elif drop >= 50:
+        points = 10
+
+    elif drop >= 30:
+        points = 8
+
+    elif drop >= 20:
+        points = 6
+
+    elif drop >= 10:
+        points = 3
+
+    else:
+        points = 1
+
+    return {
+        "drop_percent": round(
+            drop,
+            2
+        ),
+        "points": points
+    }
+
+
+# ============================================================
+# PIYASA SAPMASI
 # ============================================================
 
 def calculate_market_divergence(
@@ -950,39 +1000,30 @@ def calculate_market_divergence(
     ) * 100
 
     if drop_percent <= 0:
-
         points = 0
 
     elif drop_percent >= 70:
-
         points = 25
 
     elif drop_percent >= 60:
-
         points = 22
 
     elif drop_percent >= 50:
-
         points = 19
 
     elif drop_percent >= 40:
-
         points = 16
 
     elif drop_percent >= 30:
-
         points = 13
 
     elif drop_percent >= 20:
-
         points = 9
 
     elif drop_percent >= 10:
-
         points = 5
 
     else:
-
         points = 2
 
     return {
@@ -994,17 +1035,200 @@ def calculate_market_divergence(
     }
 
 
+# ============================================================
+# KAYNAK UYUSMAZLIGI
+# ============================================================
+
+def calculate_source_disagreement(
+    flight,
+    verification
+):
+
+    # Su anda kullandigimiz ana kaynak Ignav.
+    # Ikinci arama ayni sonucu veriyorsa
+    # kaynaklar arasinda uyusmazlik yoktur.
+    #
+    # Ileride ikinci bagimsiz fiyat kaynagi
+    # eklendiginde bu fonksiyon genisletilecektir.
+
+    if not verification.get(
+        "verified",
+        False
+    ):
+
+        return 0
+
+    return 0
+
+
+# ============================================================
+# VERGI / UCRET ANOMALISI
+# ============================================================
+
+def calculate_tax_anomaly(
+    flight
+):
+
+    # Mevcut Ignav cevabinda fiyat,
+    # zorunlu vergi ve ucretlerin ayri kalemleri
+    # her zaman gelmedigi icin burada
+    # uydurma vergi hesaplamasi yapilmiyor.
+    #
+    # Fiyat yapisinda ayri bir tax/fee bilgisi
+    # varsa ileride gercek veriyle hesaplanabilir.
+
+    return 0
+
+
+# ============================================================
+# KUR ANOMALISI
+# ============================================================
+
+def calculate_currency_anomaly(
+    currency
+):
+
+    # TRY disindaki fiyatlari cezalandirmiyoruz.
+    # Kur bilgisi olmadan sahte puan uretilmemesi icin
+    # bu asamada 0 puan kullaniliyor.
+
+    return 0
+
+
+# ============================================================
+# FARE ANOMALISI
+# ============================================================
+
+def calculate_fare_anomaly(
+    flight
+):
+
+    points = 0
+
+    baggage_text = (
+        flight.get(
+            "baggage",
+            ""
+        )
+        or ""
+    ).lower()
+
+    if (
+        "0" in baggage_text
+        and (
+            "checked" in baggage_text
+            or "bag" in baggage_text
+        )
+    ):
+
+        points += 2
+
+    if flight.get(
+        "self_transfer",
+        False
+    ):
+
+        points += 3
+
+    return min(
+        points,
+        5
+    )
+
+
+# ============================================================
+# KISA SURELI FIYAT DAVRANISI
+# ============================================================
+
+def calculate_short_lived_persistence(
+    flight,
+    departure_date
+):
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM prices
+        WHERE flight_key = ?
+          AND departure_date = ?
+        """,
+        (
+            flight["flight_key"],
+            departure_date
+        )
+    )
+
+    row = cur.fetchone()
+
+    conn.close()
+
+    count = int(
+        row[0]
+        if row and row[0] is not None
+        else 0
+    )
+
+    # Fiyat ilk kez goruluyorsa
+    # kisa sureli davranis icin puan vermiyoruz.
+    #
+    # Ayni ucus sonraki taramalarda gorulmeye devam ederse
+    # bunun hata fiyatindan ziyade kalici kampanya
+    # olma ihtimali artar.
+
+    if count <= 1:
+        return 5
+
+    if count == 2:
+        return 3
+
+    return 0
+
+
+# ============================================================
+# KAYNAK GUVENILIRLIGI
+# ============================================================
+
+def calculate_source_reliability(
+    verification
+):
+
+    if verification.get(
+        "verified",
+        False
+    ):
+
+        return 5
+
+    return 0
+
+
+# ============================================================
+# HATA SKORU
+# ============================================================
+
 def calculate_error_score(
     flight,
     normal_data,
-    previous_price=None
+    previous_price=None,
+    verification=None,
+    departure_date=None
 ):
 
-    score = 0
+    if verification is None:
+        verification = {
+            "verified": False
+        }
 
     normal_price = normal_data[
         "normal_price"
     ]
+
+    # --------------------------------------------------------
+    # 1. Tarihsel anomali - 20
+    # --------------------------------------------------------
 
     historical_points = 0
 
@@ -1022,89 +1246,152 @@ def calculate_error_score(
             ) * 100
 
             if drop >= 70:
-
                 historical_points = 20
 
             elif drop >= 60:
-
                 historical_points = 17
 
             elif drop >= 50:
-
                 historical_points = 14
 
             elif drop >= 40:
-
                 historical_points = 11
 
             elif drop >= 30:
-
                 historical_points = 8
 
             elif drop >= 20:
-
                 historical_points = 5
 
             elif drop >= 10:
-
                 historical_points = 2
 
-    score += historical_points
+    # --------------------------------------------------------
+    # 2. Piyasa sapmasi - 25
+    # --------------------------------------------------------
 
     market = calculate_market_divergence(
         flight["price"],
         normal_price
     )
 
-    score += market[
+    market_points = market[
         "market_points"
     ]
 
-    sudden_drop_points = 0
+    # --------------------------------------------------------
+    # 3. Ani dusus - 10
+    # --------------------------------------------------------
 
-    if previous_price is not None:
+    sudden = calculate_sudden_drop(
+        flight["price"],
+        previous_price
+    )
 
-        if previous_price > 0:
+    sudden_drop_points = sudden[
+        "points"
+    ]
 
-            drop_from_previous = (
-                (
-                    previous_price -
-                    flight["price"]
-                )
-                /
-                previous_price
-            ) * 100
+    # --------------------------------------------------------
+    # 4. Kaynaklar arasi uyusmazlik - 10
+    # --------------------------------------------------------
 
-            if drop_from_previous >= 50:
+    source_disagreement_points = (
+        calculate_source_disagreement(
+            flight,
+            verification
+        )
+    )
 
-                sudden_drop_points = 10
+    # --------------------------------------------------------
+    # 5. Vergi / ucret anomalisi - 10
+    # --------------------------------------------------------
 
-            elif drop_from_previous >= 30:
+    tax_points = calculate_tax_anomaly(
+        flight
+    )
 
-                sudden_drop_points = 7
+    # --------------------------------------------------------
+    # 6. Kur anomalisi - 5
+    # --------------------------------------------------------
 
-            elif drop_from_previous >= 20:
+    currency_points = calculate_currency_anomaly(
+        flight["currency"]
+    )
 
-                sudden_drop_points = 5
+    # --------------------------------------------------------
+    # 7. Fare anomalisi - 5
+    # --------------------------------------------------------
 
-            elif drop_from_previous >= 10:
+    fare_points = calculate_fare_anomaly(
+        flight
+    )
 
-                sudden_drop_points = 2
+    # --------------------------------------------------------
+    # 8. Kisa sureli fiyat davranisi - 5
+    # --------------------------------------------------------
 
-    score += sudden_drop_points
+    persistence_points = 0
+
+    if departure_date is not None:
+
+        persistence_points = (
+            calculate_short_lived_persistence(
+                flight,
+                departure_date
+            )
+        )
+
+    # --------------------------------------------------------
+    # 9. Kaynak guvenilirligi - 5
+    # --------------------------------------------------------
+
+    reliability_points = (
+        calculate_source_reliability(
+            verification
+        )
+    )
+
+    # --------------------------------------------------------
+    # TOPLAM
+    # --------------------------------------------------------
+
+    score = (
+        historical_points
+        + market_points
+        + sudden_drop_points
+        + source_disagreement_points
+        + tax_points
+        + currency_points
+        + fare_points
+        + persistence_points
+        + reliability_points
+    )
+
+    score = min(
+        score,
+        100
+    )
 
     return {
         "score": round(
-            min(score, 100),
+            score,
             2
         ),
         "historical_points": historical_points,
-        "market_points": market[
-            "market_points"
-        ],
+        "market_points": market_points,
         "sudden_drop_points": sudden_drop_points,
+        "source_disagreement_points": source_disagreement_points,
+        "tax_points": tax_points,
+        "currency_points": currency_points,
+        "fare_points": fare_points,
+        "persistence_points": persistence_points,
+        "reliability_points": reliability_points,
         "normal_price": normal_price,
         "drop_percent": market[
+            "drop_percent"
+        ],
+        "previous_drop_percent": sudden[
             "drop_percent"
         ],
         "sample_count": normal_data[
@@ -1115,6 +1402,118 @@ def calculate_error_score(
         ]
     }
 
+
+# ============================================================
+# FIRSAT SKORU
+# ============================================================
+
+def calculate_opportunity_score(
+    flight,
+    normal_data,
+    previous_price=None
+):
+
+    score = 0
+
+    normal_price = normal_data[
+        "normal_price"
+    ]
+
+    if (
+        normal_price is not None
+        and normal_price > 0
+    ):
+
+        drop = (
+            (
+                normal_price -
+                flight["price"]
+            )
+            /
+            normal_price
+        ) * 100
+
+        if drop >= 50:
+            score += 50
+
+        elif drop >= 40:
+            score += 40
+
+        elif drop >= 30:
+            score += 30
+
+        elif drop >= 20:
+            score += 20
+
+        elif drop >= 10:
+            score += 10
+
+    if previous_price is not None:
+
+        if previous_price > 0:
+
+            previous_drop = (
+                (
+                    previous_price -
+                    flight["price"]
+                )
+                /
+                previous_price
+            ) * 100
+
+            if previous_drop >= 30:
+                score += 20
+
+            elif previous_drop >= 20:
+                score += 15
+
+            elif previous_drop >= 10:
+                score += 10
+
+    if not flight.get(
+        "self_transfer",
+        False
+    ):
+
+        score += 10
+
+    baggage_text = str(
+        flight.get(
+            "baggage",
+            ""
+        )
+    ).lower()
+
+    if (
+        "checked" in baggage_text
+        or "bag" in baggage_text
+    ):
+
+        score += 10
+
+    if flight.get(
+        "duration_minutes",
+        0
+    ):
+
+        if flight[
+            "duration_minutes"
+        ] <= 180:
+
+            score += 10
+
+    return round(
+        min(
+            score,
+            100
+        ),
+        2
+    )
+
+
+# ============================================================
+# ONCEKI FIYAT
+# ============================================================
 
 def get_previous_route_price(
     origin,
@@ -1454,22 +1853,20 @@ def send_telegram_message(
     return False
 
 
-def get_alert_level(score):
+def get_alert_level(
+    score
+):
 
     if score >= 90:
-
         return "KRITIK HATA FIYATI"
 
     if score >= 85:
-
         return "HATA FIYATI ADAYI"
 
     if score >= 70:
-
         return "SUPHELI FIYAT"
 
     if score >= 50:
-
         return "IYI FIRSAT"
 
     return "NORMAL"
@@ -1515,6 +1912,7 @@ def create_and_send_alert(
     flight,
     departure_date,
     score_data,
+    opportunity_score,
     verification
 ):
 
@@ -1588,6 +1986,28 @@ def create_and_send_alert(
     message += (
         f"\nHata Skoru: "
         f"{score:.1f}/100\n"
+        f"Firsat Skoru: "
+        f"{opportunity_score:.1f}/100\n"
+        f"\n"
+        f"Skor detaylari:\n"
+        f"Tarihsel anomali: "
+        f"{score_data['historical_points']}/20\n"
+        f"Piyasa sapmasi: "
+        f"{score_data['market_points']}/25\n"
+        f"Ani dusus: "
+        f"{score_data['sudden_drop_points']}/10\n"
+        f"Kaynak farki: "
+        f"{score_data['source_disagreement_points']}/10\n"
+        f"Vergi/ucret: "
+        f"{score_data['tax_points']}/10\n"
+        f"Kur anomalisi: "
+        f"{score_data['currency_points']}/5\n"
+        f"Fare anomalisi: "
+        f"{score_data['fare_points']}/5\n"
+        f"Kisa sureli davranis: "
+        f"{score_data['persistence_points']}/5\n"
+        f"Kaynak guvenilirligi: "
+        f"{score_data['reliability_points']}/5\n\n"
         f"Havayolu: "
         f"{flight['airline']}\n"
         f"Ucus No: "
@@ -1803,7 +2223,6 @@ def build_routes():
                         )
                     )
 
-    # Tekrarları temizle.
     unique_routes = []
     seen_routes = set()
 
@@ -1812,14 +2231,19 @@ def build_routes():
         if route in seen_routes:
             continue
 
-        seen_routes.add(route)
-        unique_routes.append(route)
+        seen_routes.add(
+            route
+        )
+
+        unique_routes.append(
+            route
+        )
 
     return unique_routes
 
 
 # ============================================================
-# DONEN ROTA GRUBUNU AL
+# DONEN ROTA GRUBU
 # ============================================================
 
 def get_next_routes(
@@ -1828,6 +2252,7 @@ def get_next_routes(
 ):
 
     if not all_routes:
+
         return [], 0
 
     conn = get_connection()
@@ -1871,12 +2296,17 @@ def get_next_routes(
 
             current_index = 0
 
-    total = len(all_routes)
+    total = len(
+        all_routes
+    )
 
     selected = []
 
     for offset in range(
-        min(route_count, total)
+        min(
+            route_count,
+            total
+        )
     ):
 
         index = (
@@ -1957,6 +2387,9 @@ def main():
     print(
         "UCUS HATA FIYATI RADARI"
     )
+    print(
+        "100 PUANLIK HATA SKORU MOTORU"
+    )
     print("=" * 60)
 
     init_db()
@@ -2004,6 +2437,15 @@ def main():
     print(
         "Tahmini API aramasi: "
         f"{len(routes) * len(departure_dates)}"
+    )
+
+    print(
+        "Telegram: "
+        + (
+            "AKTIF"
+            if telegram_enabled()
+            else "KAPALI"
+        )
     )
 
     for origin, destination in routes:
@@ -2055,8 +2497,24 @@ def main():
                     )
                 )
 
-                score_data = (
+                # Ilk skor.
+                #
+                # 30+ oldugunda ikinci arama
+                # ile dogrulama yapilir.
+                preliminary_score = (
                     calculate_error_score(
+                        flight,
+                        normal_data,
+                        previous_price,
+                        verification={
+                            "verified": False
+                        },
+                        departure_date=departure_date
+                    )
+                )
+
+                opportunity_score = (
+                    calculate_opportunity_score(
                         flight,
                         normal_data,
                         previous_price
@@ -2071,8 +2529,10 @@ def main():
                     f"{flight['currency']} | "
                     f"Normal: "
                     f"{normal_data['normal_price']} | "
-                    f"Skor: "
-                    f"{score_data['score']}"
+                    f"Hata Skoru: "
+                    f"{preliminary_score['score']} | "
+                    f"Firsat: "
+                    f"{opportunity_score}"
                 )
 
                 save_flight(
@@ -2082,9 +2542,9 @@ def main():
 
                 total_saved += 1
 
-                # 30+ skorlar ikinci arama ile
-                # kontrol edilir.
-                if score_data["score"] >= 30:
+                if preliminary_score[
+                    "score"
+                ] >= 30:
 
                     print(
                         "    "
@@ -2104,6 +2564,20 @@ def main():
                         departure_date
                     )
 
+                    # Dogrulama sonucu ile
+                    # kaynak guvenilirligi ve
+                    # diger dogrulama bagimli
+                    # puanlar yeniden hesaplanir.
+                    final_score = (
+                        calculate_error_score(
+                            flight,
+                            normal_data,
+                            previous_price,
+                            verification,
+                            departure_date
+                        )
+                    )
+
                     if verification[
                         "verified"
                     ]:
@@ -2115,18 +2589,34 @@ def main():
                             "DOGRULAMA BASARILI"
                         )
 
+                        print(
+                            "    "
+                            f"Final Hata Skoru: "
+                            f"{final_score['score']}"
+                        )
+
+                        print(
+                            "    "
+                            f"Firsat Skoru: "
+                            f"{opportunity_score}"
+                        )
+
                         if create_and_send_alert(
                             flight,
                             departure_date,
-                            score_data,
+                            final_score,
+                            opportunity_score,
                             verification
                         ):
 
                             total_alerts += 1
 
-            # ------------------------------------------------
-            # Her tarih aramasindan sonra kisa bilgi.
-            # ------------------------------------------------
+                    else:
+
+                        print(
+                            "    "
+                            "DOGRULAMA BASARISIZ"
+                        )
 
             print(
                 f"  Toplam API aramasi: "
