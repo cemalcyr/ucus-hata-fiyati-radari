@@ -188,6 +188,71 @@ def init_db():
     )
 
     # --------------------------------------------------------
+    # PRICE OBSERVATIONS
+    #
+    # Her taramada fiyat gozlemini ayri kaydeder.
+    # prices tablosu ozet/gecmis fiyat tablosu olarak kalir.
+    # --------------------------------------------------------
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS price_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            flight_key TEXT NOT NULL,
+            origin TEXT,
+            destination TEXT,
+            departure_date TEXT,
+            price REAL NOT NULL,
+            currency TEXT,
+            airline TEXT,
+            flight_number TEXT,
+            duration_minutes INTEGER,
+            baggage TEXT,
+            self_transfer INTEGER DEFAULT 0,
+            observed_at TEXT
+        )
+        """
+    )
+
+    observation_columns = get_existing_columns(
+        cur,
+        "price_observations"
+    )
+
+    observation_required = {
+        "flight_key": "TEXT",
+        "origin": "TEXT",
+        "destination": "TEXT",
+        "departure_date": "TEXT",
+        "price": "REAL",
+        "currency": "TEXT",
+        "airline": "TEXT",
+        "flight_number": "TEXT",
+        "duration_minutes": "INTEGER",
+        "baggage": "TEXT",
+        "self_transfer": "INTEGER DEFAULT 0",
+        "observed_at": "TEXT"
+    }
+
+    for column_name, definition in observation_required.items():
+
+        add_missing_column(
+            cur,
+            "price_observations",
+            column_name,
+            definition,
+            observation_columns
+        )
+
+    cur.execute(
+        """
+        UPDATE price_observations
+        SET self_transfer = 0
+        WHERE self_transfer IS NULL
+        """
+    )
+
+    # --------------------------------------------------------
     # VERIFICATIONS
     # --------------------------------------------------------
 
@@ -400,8 +465,7 @@ def ignav_search(
         return None
 
     url = (
-        "https://ignav.com/api/fare"
-        "s/one-way"
+        "https://ignav.com/api/fares/one-way"
     )
 
     payload = {
@@ -608,6 +672,20 @@ def extract_flights(data):
         first_segment = segments[0]
         last_segment = segments[-1]
 
+        if not isinstance(
+            first_segment,
+            dict
+        ):
+
+            continue
+
+        if not isinstance(
+            last_segment,
+            dict
+        ):
+
+            continue
+
         origin = first_segment.get(
             "departure_airport",
             ""
@@ -721,6 +799,10 @@ def save_flight(
 
     timestamp = utc_now_iso()
 
+    # --------------------------------------------------------
+    # 1. Ozet fiyat tablosu
+    # --------------------------------------------------------
+
     cur.execute(
         """
         SELECT id
@@ -796,6 +878,76 @@ def save_flight(
                     flight["self_transfer"]
                 ),
                 timestamp,
+                timestamp
+            )
+        )
+
+    # --------------------------------------------------------
+    # 2. Gercek gozlem kaydi
+    #
+    # Ayni taramada ayni ucus iki kez gelirse
+    # gereksiz duplicate gozlem eklemiyoruz.
+    # --------------------------------------------------------
+
+    cur.execute(
+        """
+        SELECT id
+        FROM price_observations
+        WHERE flight_key = ?
+          AND departure_date = ?
+          AND price = ?
+          AND currency = ?
+          AND observed_at = ?
+        LIMIT 1
+        """,
+        (
+            flight["flight_key"],
+            departure_date,
+            flight["price"],
+            flight["currency"],
+            timestamp
+        )
+    )
+
+    observation_exists = cur.fetchone()
+
+    if observation_exists is None:
+
+        cur.execute(
+            """
+            INSERT INTO price_observations (
+                flight_key,
+                origin,
+                destination,
+                departure_date,
+                price,
+                currency,
+                airline,
+                flight_number,
+                duration_minutes,
+                baggage,
+                self_transfer,
+                observed_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?
+            )
+            """,
+            (
+                flight["flight_key"],
+                flight["origin"],
+                flight["destination"],
+                departure_date,
+                flight["price"],
+                flight["currency"],
+                flight["airline"],
+                flight["flight_number"],
+                flight["duration_minutes"],
+                flight["baggage"],
+                int(
+                    flight["self_transfer"]
+                ),
                 timestamp
             )
         )
@@ -913,6 +1065,55 @@ def calculate_normal_price(
         "sample_count": len(history),
         "confidence": confidence
     }
+
+
+# ============================================================
+# AYNI UCUSUN ONCEKI FIYATI
+# ============================================================
+
+def get_previous_flight_price(
+    flight,
+    departure_date
+):
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT price
+        FROM price_observations
+        WHERE flight_key = ?
+          AND departure_date = ?
+          AND currency = ?
+        ORDER BY id DESC
+        LIMIT 2
+        """,
+        (
+            flight["flight_key"],
+            departure_date,
+            flight["currency"]
+        )
+    )
+
+    rows = cur.fetchall()
+
+    conn.close()
+
+    if len(rows) < 2:
+        return None
+
+    try:
+
+        latest_previous = float(
+            rows[1][0]
+        )
+
+    except Exception:
+
+        return None
+
+    return latest_previous
 
 
 # ============================================================
@@ -1044,19 +1245,9 @@ def calculate_source_disagreement(
     verification
 ):
 
-    # Su anda kullandigimiz ana kaynak Ignav.
-    # Ikinci arama ayni sonucu veriyorsa
-    # kaynaklar arasinda uyusmazlik yoktur.
-    #
-    # Ileride ikinci bagimsiz fiyat kaynagi
-    # eklendiginde bu fonksiyon genisletilecektir.
-
-    if not verification.get(
-        "verified",
-        False
-    ):
-
-        return 0
+    # Su anda bagimsiz ikinci fiyat kaynagi yok.
+    # Ayni Ignav aramasinin ikinci kez yapilmasi
+    # bagimsiz kaynak sayilmaz.
 
     return 0
 
@@ -1069,13 +1260,9 @@ def calculate_tax_anomaly(
     flight
 ):
 
-    # Mevcut Ignav cevabinda fiyat,
-    # zorunlu vergi ve ucretlerin ayri kalemleri
-    # her zaman gelmedigi icin burada
-    # uydurma vergi hesaplamasi yapilmiyor.
-    #
-    # Fiyat yapisinda ayri bir tax/fee bilgisi
-    # varsa ileride gercek veriyle hesaplanabilir.
+    # Ignav cevabinda ayri tax/fee kalemleri
+    # guvenilir sekilde bulunmadigi icin
+    # varsayimla puan vermiyoruz.
 
     return 0
 
@@ -1088,11 +1275,66 @@ def calculate_currency_anomaly(
     currency
 ):
 
-    # TRY disindaki fiyatlari cezalandirmiyoruz.
-    # Kur bilgisi olmadan sahte puan uretilmemesi icin
-    # bu asamada 0 puan kullaniliyor.
+    # Kur servisi eklenmeden sahte puan yok.
 
     return 0
+
+
+# ============================================================
+# BAGAJ YARDIMCILARI
+# ============================================================
+
+def baggage_has_checked_bag(
+    baggage_text
+):
+
+    text = (
+        baggage_text
+        or ""
+    ).lower()
+
+    if not text:
+        return False
+
+    checked_terms = [
+        "checked",
+        "checked_bag",
+        "checked_bags",
+        "check_in_bag",
+        "check-in bag",
+        "bag_count"
+    ]
+
+    for term in checked_terms:
+
+        if term in text:
+            return True
+
+    return False
+
+
+def baggage_looks_zero(
+    baggage_text
+):
+
+    text = (
+        baggage_text
+        or ""
+    ).lower()
+
+    zero_terms = [
+        "'checked': 0",
+        '"checked": 0',
+        "'checked_bags': 0",
+        '"checked_bags": 0',
+        "'checked_bag': 0",
+        '"checked_bag": 0'
+    ]
+
+    return any(
+        term in text
+        for term in zero_terms
+    )
 
 
 # ============================================================
@@ -1111,13 +1353,14 @@ def calculate_fare_anomaly(
             ""
         )
         or ""
-    ).lower()
+    )
 
     if (
-        "0" in baggage_text
-        and (
-            "checked" in baggage_text
-            or "bag" in baggage_text
+        baggage_looks_zero(
+            baggage_text
+        )
+        and baggage_has_checked_bag(
+            baggage_text
         )
     ):
 
@@ -1151,7 +1394,7 @@ def calculate_short_lived_persistence(
     cur.execute(
         """
         SELECT COUNT(*)
-        FROM prices
+        FROM price_observations
         WHERE flight_key = ?
           AND departure_date = ?
         """,
@@ -1171,18 +1414,17 @@ def calculate_short_lived_persistence(
         else 0
     )
 
-    # Fiyat ilk kez goruluyorsa
-    # kisa sureli davranis icin puan vermiyoruz.
+    # Henuz gelecek taramada fiyat kayboldu mu
+    # bilemedigimiz icin ilk gozleme puan vermiyoruz.
     #
-    # Ayni ucus sonraki taramalarda gorulmeye devam ederse
-    # bunun hata fiyatindan ziyade kalici kampanya
-    # olma ihtimali artar.
+    # Bu alan ancak yeterli gozlem olustugunda
+    # daha ileri gelistirilebilir.
 
     if count <= 1:
-        return 5
+        return 0
 
     if count == 2:
-        return 3
+        return 0
 
     return 0
 
@@ -1218,6 +1460,7 @@ def calculate_error_score(
 ):
 
     if verification is None:
+
         verification = {
             "verified": False
         }
@@ -1328,7 +1571,7 @@ def calculate_error_score(
     )
 
     # --------------------------------------------------------
-    # 8. Kisa sureli fiyat davranisi - 5
+    # 8. Kisa sureli davranis - 5
     # --------------------------------------------------------
 
     persistence_points = 0
@@ -1482,11 +1725,10 @@ def calculate_opportunity_score(
             "baggage",
             ""
         )
-    ).lower()
+    )
 
-    if (
-        "checked" in baggage_text
-        or "bag" in baggage_text
+    if baggage_has_checked_bag(
+        baggage_text
     ):
 
         score += 10
@@ -1512,7 +1754,7 @@ def calculate_opportunity_score(
 
 
 # ============================================================
-# ONCEKI FIYAT
+# ROTA ONCEKI FIYATI
 # ============================================================
 
 def get_previous_route_price(
@@ -1783,6 +2025,25 @@ def telegram_enabled():
     )
 
 
+def telegram_min_score():
+
+    value = settings.get(
+        "alerts",
+        {}
+    ).get(
+        "telegram_min_score",
+        50
+    )
+
+    try:
+
+        return float(value)
+
+    except Exception:
+
+        return 50.0
+
+
 def send_telegram_message(
     message
 ):
@@ -1873,31 +2134,120 @@ def get_alert_level(
 
 
 # ============================================================
+# HATA FIYATI ACIKLAMASI
+# ============================================================
+
+def build_why_text(
+    score_data,
+    flight,
+    verification
+):
+
+    reasons = []
+
+    if score_data[
+        "historical_points"
+    ] >= 11:
+
+        reasons.append(
+            "Rotanin normal fiyatinin belirgin "
+            "sekilde altinda."
+        )
+
+    if score_data[
+        "market_points"
+    ] >= 13:
+
+        reasons.append(
+            "Piyasa normaline gore ciddi sapma var."
+        )
+
+    if score_data[
+        "sudden_drop_points"
+    ] >= 6:
+
+        reasons.append(
+            "Ayni ucusta onceki gozleme gore "
+            "ani fiyat dususu var."
+        )
+
+    if score_data[
+        "fare_points"
+    ] > 0:
+
+        if flight.get(
+            "self_transfer",
+            False
+        ):
+
+            reasons.append(
+                "Self-transfer iceren bir tarife."
+            )
+
+        elif baggage_looks_zero(
+            flight.get(
+                "baggage",
+                ""
+            )
+        ):
+
+            reasons.append(
+                "Bagaj yapisinda anormal/limitli "
+                "bir gorunum var."
+            )
+
+    if score_data[
+        "reliability_points"
+    ] > 0:
+
+        reasons.append(
+            "Fiyat ikinci Ignav aramasinda "
+            "dogrulandi."
+        )
+
+    if not reasons:
+
+        reasons.append(
+            "Mevcut veriler hata fiyati icin "
+            "yeterince guclu bir neden gostermiyor."
+        )
+
+    return reasons
+
+
+# ============================================================
 # ALERT
 # ============================================================
 
 def alert_already_sent(
-    flight_key,
-    price,
+    flight,
     departure_date
 ):
 
     conn = get_connection()
     cur = conn.cursor()
 
+    # Ayni rota + tarih + fiyat + para birimi
+    # ayni firsatin farkli itinerary/flight_key
+    # olarak tekrar gonderilmesini engeller.
+
     cur.execute(
         """
         SELECT id
         FROM alerts
-        WHERE flight_key = ?
-          AND price = ?
+        WHERE origin = ?
+          AND destination = ?
           AND departure_date = ?
+          AND price = ?
+          AND currency = ?
         LIMIT 1
         """,
         (
-            flight_key,
-            price,
-            departure_date
+            flight["origin"],
+            flight["destination"],
+            departure_date,
+            flight["price"],
+            flight["currency"]
         )
     )
 
@@ -1926,18 +2276,21 @@ def create_and_send_alert(
 
         return False
 
-    if score < 50:
+    minimum_score = (
+        telegram_min_score()
+    )
+
+    if score < minimum_score:
 
         return False
 
     if alert_already_sent(
-        flight["flight_key"],
-        flight["price"],
+        flight,
         departure_date
     ):
 
         print(
-            "Bu fiyat icin daha once "
+            "Bu rota/tarih/fiyat icin daha once "
             "uyari gonderilmis."
         )
 
@@ -1958,6 +2311,12 @@ def create_and_send_alert(
     sample_count = score_data[
         "sample_count"
     ]
+
+    why_reasons = build_why_text(
+        score_data,
+        flight,
+        verification
+    )
 
     message = (
         f"{level}\n\n"
@@ -1988,8 +2347,17 @@ def create_and_send_alert(
         f"{score:.1f}/100\n"
         f"Firsat Skoru: "
         f"{opportunity_score:.1f}/100\n"
-        f"\n"
-        f"Skor detaylari:\n"
+        f"\nNEDEN DIKKAT CEKIYOR?\n"
+    )
+
+    for reason in why_reasons:
+
+        message += (
+            f"- {reason}\n"
+        )
+
+    message += (
+        f"\nSkor detaylari:\n"
         f"Tarihsel anomali: "
         f"{score_data['historical_points']}/20\n"
         f"Piyasa sapmasi: "
@@ -2385,10 +2753,10 @@ def main():
     print("")
     print("=" * 60)
     print(
-        "UCUS HATA FIYATI RADARI"
+        "UCUS HATA FIYATI RADARI V2"
     )
     print(
-        "100 PUANLIK HATA SKORU MOTORU"
+        "GELISTIRILMIS HATA FIYATI MOTORU"
     )
     print("=" * 60)
 
@@ -2411,6 +2779,11 @@ def main():
     total_verified = 0
     total_alerts = 0
     total_api_searches = 0
+
+    # Aynı workflow icinde
+    # ayni ucus icin tekrar verification
+    # yapilmasini engeller.
+    verification_cache = {}
 
     print(
         f"Toplam rota havuzu: "
@@ -2446,6 +2819,11 @@ def main():
             if telegram_enabled()
             else "KAPALI"
         )
+    )
+
+    print(
+        "Telegram minimum skor: "
+        f"{telegram_min_score():.0f}"
     )
 
     for origin, destination in routes:
@@ -2488,19 +2866,38 @@ def main():
                     )
                 )
 
+                # Once ayni ucusun kendi
+                # fiyat gecmisine bak.
                 previous_price = (
-                    get_previous_route_price(
-                        flight["origin"],
-                        flight["destination"],
-                        flight["currency"],
-                        flight["price"]
+                    get_previous_flight_price(
+                        flight,
+                        departure_date
                     )
                 )
 
-                # Ilk skor.
+                # Ayni ucusta gecmis yoksa
+                # rota bazli fallback kullan.
                 #
-                # 30+ oldugunda ikinci arama
-                # ile dogrulama yapilir.
+                # Bu fallback ani dususu maksimum
+                # 3 puanla sinirlayan yardimci mantik
+                # icin main tarafinda kullanilacak.
+                if previous_price is None:
+
+                    previous_price = (
+                        get_previous_route_price(
+                            flight["origin"],
+                            flight["destination"],
+                            flight["currency"],
+                            flight["price"]
+                        )
+                    )
+
+                    fallback_previous = True
+
+                else:
+
+                    fallback_previous = False
+
                 preliminary_score = (
                     calculate_error_score(
                         flight,
@@ -2512,6 +2909,53 @@ def main():
                         departure_date=departure_date
                     )
                 )
+
+                # Rota fallback'i kullaniliyorsa
+                # ani dusus puani hata fiyatini
+                # gereksiz yere sisirmesin.
+                if fallback_previous:
+
+                    preliminary_score[
+                        "sudden_drop_points"
+                    ] = min(
+                        preliminary_score[
+                            "sudden_drop_points"
+                        ],
+                        3
+                    )
+
+                    preliminary_score[
+                        "score"
+                    ] = round(
+                        preliminary_score[
+                            "historical_points"
+                        ]
+                        + preliminary_score[
+                            "market_points"
+                        ]
+                        + preliminary_score[
+                            "sudden_drop_points"
+                        ]
+                        + preliminary_score[
+                            "source_disagreement_points"
+                        ]
+                        + preliminary_score[
+                            "tax_points"
+                        ]
+                        + preliminary_score[
+                            "currency_points"
+                        ]
+                        + preliminary_score[
+                            "fare_points"
+                        ]
+                        + preliminary_score[
+                            "persistence_points"
+                        ]
+                        + preliminary_score[
+                            "reliability_points"
+                        ],
+                        2
+                    )
 
                 opportunity_score = (
                     calculate_opportunity_score(
@@ -2551,23 +2995,49 @@ def main():
                         "Dogrulama yapiliyor..."
                     )
 
-                    verification = (
-                        verify_flight(
+                    verification_key = (
+                        flight["flight_key"],
+                        departure_date,
+                        flight["price"],
+                        flight["currency"]
+                    )
+
+                    if (
+                        verification_key
+                        in verification_cache
+                    ):
+
+                        verification = (
+                            verification_cache[
+                                verification_key
+                            ]
+                        )
+
+                        print(
+                            "    "
+                            "Ayni workflow icinde "
+                            "onceki dogrulama kullaniliyor."
+                        )
+
+                    else:
+
+                        verification = (
+                            verify_flight(
+                                flight,
+                                departure_date
+                            )
+                        )
+
+                        verification_cache[
+                            verification_key
+                        ] = verification
+
+                        save_verification(
                             flight,
+                            verification,
                             departure_date
                         )
-                    )
 
-                    save_verification(
-                        flight,
-                        verification,
-                        departure_date
-                    )
-
-                    # Dogrulama sonucu ile
-                    # kaynak guvenilirligi ve
-                    # diger dogrulama bagimli
-                    # puanlar yeniden hesaplanir.
                     final_score = (
                         calculate_error_score(
                             flight,
@@ -2577,6 +3047,52 @@ def main():
                             departure_date
                         )
                     )
+
+                    # Fallback rota gecmisi kullaniyorsak
+                    # final ani dusus puani da 3 ile sinirli.
+                    if fallback_previous:
+
+                        final_score[
+                            "sudden_drop_points"
+                        ] = min(
+                            final_score[
+                                "sudden_drop_points"
+                            ],
+                            3
+                        )
+
+                        final_score[
+                            "score"
+                        ] = round(
+                            final_score[
+                                "historical_points"
+                            ]
+                            + final_score[
+                                "market_points"
+                            ]
+                            + final_score[
+                                "sudden_drop_points"
+                            ]
+                            + final_score[
+                                "source_disagreement_points"
+                            ]
+                            + final_score[
+                                "tax_points"
+                            ]
+                            + final_score[
+                                "currency_points"
+                            ]
+                            + final_score[
+                                "fare_points"
+                            ]
+                            + final_score[
+                                "persistence_points"
+                            ]
+                            + final_score[
+                                "reliability_points"
+                            ],
+                            2
+                        )
 
                     if verification[
                         "verified"
@@ -2600,6 +3116,34 @@ def main():
                             f"Firsat Skoru: "
                             f"{opportunity_score}"
                         )
+
+                        if final_score[
+                            "score"
+                        ] >= 90:
+
+                            print(
+                                "    "
+                                ">>> YUKSEK GUVENLI "
+                                "HATA FIYATI ADAYI <<<"
+                            )
+
+                        elif final_score[
+                            "score"
+                        ] >= 85:
+
+                            print(
+                                "    "
+                                ">>> HATA FIYATI ADAYI <<<"
+                            )
+
+                        elif final_score[
+                            "score"
+                        ] >= 70:
+
+                            print(
+                                "    "
+                                ">>> SUPHELI FIYAT <<<"
+                            )
 
                         if create_and_send_alert(
                             flight,
