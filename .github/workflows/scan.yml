@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: "17 */6 * * *"
 
+permissions:
+  contents: write
+
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -25,3 +28,17 @@ jobs:
         env:
           IGNAV_API_KEY: ${{ secrets.IGNAV_API_KEY }}
         run: python app.py
+
+      - name: Fiyat gecmisini kaydet
+        run: |
+          git config user.name "Ucus Hata Fiyati Radari"
+          git config user.email "actions@github.com"
+
+          git add prices.db
+
+          if git diff --cached --quiet; then
+            echo "Yeni fiyat verisi yok."
+          else
+            git commit -m "Fiyat gecmisini guncelle"
+            git push
+          fi
