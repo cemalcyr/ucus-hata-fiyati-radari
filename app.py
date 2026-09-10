@@ -9,16 +9,40 @@ SETTINGS_FILE = "config/settings.json"
 
 
 def load_settings():
-    if not os.path.exists(SETTINGS_FILE):
-        raise FileNotFoundError(
-            f"{SETTINGS_FILE} bulunamadi."
-        )
-
     with open(SETTINGS_FILE, "r", encoding="utf-8") as file:
         return json.load(file)
 
 
-def search_flights(origin, destination, departure_date, settings):
+def build_routes(settings):
+    routes = []
+
+    domestic = settings["airports"]["domestic_destinations"]
+    europe = settings["airports"]["europe_destinations"]
+
+    # SZF -> Türkiye
+    if settings["airports"]["domestic_enabled"]:
+        for destination in domestic:
+            if destination != "SZF":
+                routes.append(("SZF", destination))
+
+        # Türkiye -> SZF
+        for origin in domestic:
+            if origin != "SZF":
+                routes.append((origin, "SZF"))
+
+    # SZF -> Avrupa
+    if settings["airports"]["europe_enabled"]:
+        for destination in europe:
+            routes.append(("SZF", destination))
+
+        # Avrupa -> SZF
+        for origin in europe:
+            routes.append((origin, "SZF"))
+
+    return routes
+
+
+def search_flight(origin, destination, departure_date, settings):
     passengers = settings["passengers"]
     connections = settings["connections"]
 
@@ -26,100 +50,86 @@ def search_flights(origin, destination, departure_date, settings):
         f"{API_URL}/fares/one-way",
         headers={
             "X-Api-Key": API_KEY,
-            "Content-Type": "application/json",
+            "Content-Type": "application/json"
         },
         json={
             "origin": origin,
             "destination": destination,
             "departure_date": departure_date,
-
             "adults": passengers["adults"],
             "children": passengers["children"],
             "infants_on_lap": passengers["infants"],
-
             "cabin_class": "economy",
-
             "max_stops": connections["max_connections"],
             "allow_self_transfer": connections["self_transfer"],
-
-            "market": "TR",
+            "market": "TR"
         },
-        timeout=60,
+        timeout=60
     )
 
-    print("HTTP STATUS:", response.status_code)
-
     if not response.ok:
-        print("API ERROR:")
-        print(response.text)
-        response.raise_for_status()
+        print(
+            f"HATA {origin}->{destination}: "
+            f"{response.status_code}"
+        )
+        return None
 
     return response.json()
 
 
 def main():
     if not API_KEY:
-        raise RuntimeError(
-            "IGNAV_API_KEY bulunamadi."
-        )
+        raise RuntimeError("IGNAV_API_KEY bulunamadi.")
 
     settings = load_settings()
+    routes = build_routes(settings)
 
     departure_date = (
         date.today() + timedelta(days=30)
     ).isoformat()
 
-    print("================================")
+    print("======================================")
     print("UCUS HATA FIYATI RADARI")
-    print("================================")
+    print("======================================")
     print()
-
-    print("Ayarlar basariyla okundu.")
-    print()
-
-    print("Oncelikli kalkislar:",
-          settings["airports"]["priority_origins"])
-
-    print("Oncelikli varisler:",
-          settings["airports"]["priority_destinations"])
-
-    print("Yolcular:",
-          settings["passengers"])
-
-    print("Maksimum aktarma:",
-          settings["connections"]["max_connections"])
-
-    print("Kendi kendine aktarma:",
-          settings["connections"]["self_transfer"])
-
+    print("Tarama tarihi:", departure_date)
+    print("Toplam rota:", len(routes))
     print("API butcesi:",
-          settings["system"]["api_budget_tl"],
-          "TL")
-
-    print("Ucretli API izni:",
-          settings["system"]["paid_api_allowed"])
-
+          settings["system"]["api_budget_tl"], "TL")
     print()
-    print("TEST")
-    print("--------------------------------")
 
-    data = search_flights(
-        "SZF",
-        "IST",
-        departure_date,
-        settings
-    )
+    # İlk aşamada güvenli test:
+    # Sadece ilk 5 rota taranır.
+    test_routes = routes[:5]
 
+    print("Bu calismada taranacak rota:", len(test_routes))
     print()
-    print("SONUC BASARILI")
-    print("--------------------------------")
 
-    if isinstance(data, dict):
-        print("API cevabi alindi.")
-        print("Anahtarlar:", list(data.keys()))
+    for number, (origin, destination) in enumerate(
+        test_routes, start=1
+    ):
+        print(
+            f"[{number}/{len(test_routes)}] "
+            f"{origin} -> {destination}"
+        )
 
-    print()
-    print("Tarama tamamlandi.")
+        data = search_flight(
+            origin,
+            destination,
+            departure_date,
+            settings
+        )
+
+        if data is not None:
+            print("  OK - veri alindi")
+        else:
+            print("  Veri alinamadi")
+
+        print()
+
+    print("======================================")
+    print("TARAMA TESTI TAMAMLANDI")
+    print("======================================")
 
 
 if __name__ == "__main__":
