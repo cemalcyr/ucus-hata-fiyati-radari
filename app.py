@@ -144,11 +144,9 @@ def get_airline(flight):
     if not segments:
         return None
 
-    first = segments[0]
-
     return (
-        first.get("carrier")
-        or first.get("airline")
+        segments[0].get("carrier")
+        or segments[0].get("airline")
     )
 
 
@@ -158,11 +156,9 @@ def get_flight_number(flight):
     if not segments:
         return None
 
-    first = segments[0]
-
     return (
-        first.get("flight_number")
-        or first.get("flightNumber")
+        segments[0].get("flight_number")
+        or segments[0].get("flightNumber")
     )
 
 
@@ -197,6 +193,15 @@ def save_flight(
     departure_date,
     flight
 ):
+    price = get_price(flight)
+
+    price_info = flight.get("price", {})
+
+    status = None
+
+    if isinstance(price_info, dict):
+        status = price_info.get("status")
+
     connection.execute("""
         INSERT INTO prices (
             origin,
@@ -218,16 +223,14 @@ def save_flight(
         origin,
         destination,
         departure_date,
-        get_price(flight),
+        price,
         get_currency(flight),
         get_airline(flight),
         get_flight_number(flight),
         get_duration(flight),
         get_checked_bags(flight),
         int(get_self_transfer(flight)),
-        flight.get("price", {}).get("status")
-        if isinstance(flight.get("price"), dict)
-        else None,
+        status,
         "Ignav",
         datetime.utcnow().isoformat()
     ))
@@ -235,22 +238,19 @@ def save_flight(
     connection.commit()
 
 
-def calculate_error_score(
+def get_history(
     connection,
     origin,
     destination,
-    departure_date,
-    current_price
+    departure_date
 ):
-    if current_price is None or current_price <= 0:
-        return 0, 0, None
-
     cursor = connection.execute("""
         SELECT price
         FROM prices
         WHERE origin = ?
           AND destination = ?
           AND departure_date = ?
+          AND currency = 'TRY'
           AND price IS NOT NULL
           AND price > 0
         ORDER BY id DESC
@@ -261,50 +261,186 @@ def calculate_error_score(
         departure_date
     ))
 
-    rows = cursor.fetchall()
-
-    prices = [
+    return [
         float(row[0])
-        for row in rows
+        for row in cursor.fetchall()
     ]
 
-    # Mevcut taramayı geçmiş karşılaştırmasına
-    # dahil etmeden önce yeterli geçmiş var mı?
-    if len(prices) < 2:
-        return 0, 0, None
 
-    average_price = sum(prices) / len(prices)
+def calculate_error_score(
+    connection,
+    origin,
+    destination,
+    departure_date,
+    current_price,
+    settings
+):
+    weights = settings["scoring"]["error_score"]
 
-    minimum_price = min(prices)
+    history = get_history(
+        connection,
+        origin,
+        destination,
+        departure_date
+    )
 
-    if average_price <= 0:
-        return 0, 0, None
+    # Henüz yeterli geçmiş yoksa güvenilir
+    # tarihsel karşılaştırma yapmıyoruz.
+    if len(history) < 3:
+        return {
+            "total": 0,
+            "band": "veri yetersiz",
+            "historical": 0,
+            "market": 0,
+            "sudden_drop": 0,
+            "source_disagreement": 0,
+            "tax": 0,
+            "currency": 0,
+            "fare": 0,
+            "short_lived": 0,
+            "reliability": 0,
+            "average": None,
+            "drop_percent": None,
+            "history_count": len(history)
+        }
+
+    average = sum(history) / len(history)
+    minimum = min(history)
+
+    if average <= 0:
+        return {
+            "total": 0,
+            "band": "veri yetersiz",
+            "historical": 0,
+            "market": 0,
+            "sudden_drop": 0,
+            "source_disagreement": 0,
+            "tax": 0,
+            "currency": 0,
+            "fare": 0,
+            "short_lived": 0,
+            "reliability": 0,
+            "average": average,
+            "drop_percent": 0,
+            "history_count": len(history)
+        }
 
     drop_percent = (
-        (average_price - current_price)
-        / average_price
+        (average - current_price)
+        / average
     ) * 100
 
-    # Sadece fiyat düşüşüne dayalı ilk skor.
-    # Diğer puanlar sonraki aşamalarda eklenecek.
+    # 1. Tarihsel anomali - 20 puan
     historical_score = min(
-        20,
+        weights["historical_anomaly"],
         max(
             0,
-            drop_percent * 0.5
+            drop_percent / 100
+            * weights["historical_anomaly"]
         )
     )
 
-    error_score = round(
-        historical_score,
+    # 2. Piyasa karşılaştırması
+    # İkinci kaynak henüz eklenmedi.
+    market_score = 0
+
+    # 3. Ani düşüş
+    sudden_drop_score = 0
+
+    if len(history) >= 2:
+        previous = history[0]
+
+        if previous > 0:
+            sudden_drop = (
+                (previous - current_price)
+                / previous
+            ) * 100
+
+            sudden_drop_score = min(
+                weights["sudden_drop"],
+                max(
+                    0,
+                    sudden_drop / 50
+                    * weights["sudden_drop"]
+                )
+            )
+
+    # 4. Kaynaklar arası fark
+    source_disagreement_score = 0
+
+    # 5. Vergi / ücret anomalisi
+    tax_score = 0
+
+    # 6. Kur anomalisi
+    currency_score = 0
+
+    # 7. Fare anomalisi
+    fare_score = 0
+
+    # 8. Kısa süreli fiyat
+    short_lived_score = 0
+
+    # 9. Kaynak güvenilirliği
+    # Şimdilik Ignav verisinin API cevabını
+    # başarıyla almamız yalnız başına
+    # "yüksek güven" anlamına gelmez.
+    reliability_score = 0
+
+    total = (
+        historical_score
+        + market_score
+        + sudden_drop_score
+        + source_disagreement_score
+        + tax_score
+        + currency_score
+        + fare_score
+        + short_lived_score
+        + reliability_score
+    )
+
+    total = round(
+        min(100, max(0, total)),
         1
     )
 
-    return (
-        error_score,
-        round(drop_percent, 1),
-        round(average_price, 2)
-    )
+    thresholds = settings["scoring"]["thresholds"]
+
+    if total >= thresholds["high_confidence"]:
+        band = "yüksek güvenli hata fiyatı"
+    elif total >= thresholds["candidate"]:
+        band = "aday"
+    elif total >= thresholds["suspicious"]:
+        band = "şüpheli"
+    elif total >= thresholds["good_deal"]:
+        band = "iyi fırsat"
+    else:
+        band = "normal"
+
+    return {
+        "total": total,
+        "band": band,
+        "historical": round(historical_score, 1),
+        "market": round(market_score, 1),
+        "sudden_drop": round(sudden_drop_score, 1),
+        "source_disagreement": round(
+            source_disagreement_score, 1
+        ),
+        "tax": round(tax_score, 1),
+        "currency": round(currency_score, 1),
+        "fare": round(fare_score, 1),
+        "short_lived": round(
+            short_lived_score, 1
+        ),
+        "reliability": round(
+            reliability_score, 1
+        ),
+        "average": round(average, 2),
+        "minimum": round(minimum, 2),
+        "drop_percent": round(
+            drop_percent, 1
+        ),
+        "history_count": len(history)
+    }
 
 
 def main():
@@ -330,7 +466,7 @@ def main():
     print("Toplam rota:", len(routes))
     print()
 
-    # Şimdilik API tüketimini düşük tutuyoruz.
+    # Şimdilik düşük API kullanımı.
     test_routes = routes[:5]
 
     total_saved = 0
@@ -365,25 +501,21 @@ def main():
 
         for flight in flights:
             price = get_price(flight)
+            currency = get_currency(flight)
 
             if price is None:
                 continue
 
-            currency = get_currency(flight)
-
-            # Şimdilik yalnızca TRY fiyatlarını
-            # doğrudan karşılaştırıyoruz.
             if currency != "TRY":
                 continue
 
-            error_score, drop_percent, average_price = (
-                calculate_error_score(
-                    connection,
-                    origin,
-                    destination,
-                    departure_date,
-                    price
-                )
+            score = calculate_error_score(
+                connection,
+                origin,
+                destination,
+                departure_date,
+                price,
+                settings
             )
 
             save_flight(
@@ -396,18 +528,42 @@ def main():
 
             total_saved += 1
 
+            print()
             print(
-                f"  {origin}->{destination} "
-                f"{price:.0f} {currency} | "
-                f"Error Score: {error_score}/100"
+                f"  {origin} -> {destination}"
+            )
+            print(
+                f"  Fiyat: {price:.0f} {currency}"
+            )
+            print(
+                f"  Error Score: "
+                f"{score['total']}/100"
+            )
+            print(
+                f"  Durum: {score['band']}"
             )
 
-            if average_price is not None:
+            if score["average"] is not None:
                 print(
                     f"  Normal ortalama: "
-                    f"{average_price:.0f} TRY | "
-                    f"Dusus: {drop_percent}%"
+                    f"{score['average']:.0f} TRY"
                 )
+                print(
+                    f"  Düşüş: "
+                    f"{score['drop_percent']}%"
+                )
+
+            print(
+                f"  Geçmiş kayıt: "
+                f"{score['history_count']}"
+            )
+
+            print(
+                "  Puan dağılımı: "
+                f"Tarihsel={score['historical']} | "
+                f"Ani düşüş={score['sudden_drop']} | "
+                f"Piyasa={score['market']}"
+            )
 
         print()
 
@@ -416,9 +572,13 @@ def main():
     print("======================================")
     print("TARAMA TAMAMLANDI")
     print("======================================")
-    print("Kaydedilen fiyat:", total_saved)
-    print()
-    print("Error Score motoru aktif.")
+    print(
+        "Kaydedilen fiyat:",
+        total_saved
+    )
+    print(
+        "100 puanlık Error Score aktif."
+    )
 
 
 if __name__ == "__main__":
