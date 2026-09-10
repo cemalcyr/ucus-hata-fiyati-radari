@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+import hashlib
 import requests
 from datetime import date, timedelta, datetime
 
@@ -21,6 +22,7 @@ def create_database():
     connection.execute("""
         CREATE TABLE IF NOT EXISTS prices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            flight_key TEXT,
             origin TEXT NOT NULL,
             destination TEXT NOT NULL,
             departure_date TEXT NOT NULL,
@@ -38,6 +40,21 @@ def create_database():
     """)
 
     connection.commit()
+
+    # Eski veritabanlarında flight_key yoksa ekle.
+    columns = [
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(prices)"
+        ).fetchall()
+    ]
+
+    if "flight_key" not in columns:
+        connection.execute(
+            "ALTER TABLE prices ADD COLUMN flight_key TEXT"
+        )
+        connection.commit()
+
     return connection
 
 
@@ -108,6 +125,11 @@ def extract_flights(data):
     if not isinstance(data, dict):
         return []
 
+    # Güncel Ignav formatı
+    if isinstance(data.get("itineraries"), list):
+        return data["itineraries"]
+
+    # Eski/alternatif formatlar
     for key in ["fares", "results", "flights", "data"]:
         value = data.get(key)
 
@@ -139,27 +161,28 @@ def get_currency(flight):
 
 
 def get_airline(flight):
-    segments = flight.get("outbound", {}).get("segments", [])
+    outbound = flight.get("outbound", {})
+    segments = outbound.get("segments", [])
 
     if not segments:
-        return None
+        return outbound.get("carrier")
 
     return (
-        segments[0].get("carrier")
-        or segments[0].get("airline")
+        segments[0].get("marketing_carrier_code")
+        or outbound.get("carrier")
+        or segments[0].get("operating_carrier_name")
     )
 
 
 def get_flight_number(flight):
-    segments = flight.get("outbound", {}).get("segments", [])
+    segments = flight.get(
+        "outbound", {}
+    ).get("segments", [])
 
     if not segments:
         return None
 
-    return (
-        segments[0].get("flight_number")
-        or segments[0].get("flightNumber")
-    )
+    return segments[0].get("flight_number")
 
 
 def get_duration(flight):
@@ -172,6 +195,14 @@ def get_duration(flight):
 
 
 def get_checked_bags(flight):
+    # Güncel Ignav formatı: bags.checked
+    bags = flight.get("bags")
+
+    if isinstance(bags, dict):
+        if bags.get("checked") is not None:
+            return bags.get("checked")
+
+    # Eski format için
     baggage = flight.get("baggage")
 
     if isinstance(baggage, dict):
@@ -182,8 +213,62 @@ def get_checked_bags(flight):
 
 def get_self_transfer(flight):
     return bool(
-        flight.get("requires_self_transfer", False)
+        flight.get(
+            "requires_self_transfer",
+            False
+        )
     )
+
+
+def create_flight_key(
+    origin,
+    destination,
+    departure_date,
+    flight
+):
+    outbound = flight.get("outbound", {})
+    segments = outbound.get("segments", [])
+
+    parts = [
+        origin,
+        destination,
+        departure_date,
+        str(flight.get("cabin_class", "economy"))
+    ]
+
+    for segment in segments:
+        parts.extend([
+            segment.get(
+                "marketing_carrier_code",
+                ""
+            ),
+            segment.get(
+                "flight_number",
+                ""
+            ),
+            segment.get(
+                "departure_airport",
+                ""
+            ),
+            segment.get(
+                "arrival_airport",
+                ""
+            ),
+            segment.get(
+                "departure_time_local",
+                ""
+            ),
+            segment.get(
+                "arrival_time_local",
+                ""
+            )
+        ])
+
+    raw_key = "|".join(parts)
+
+    return hashlib.sha256(
+        raw_key.encode("utf-8")
+    ).hexdigest()[:32]
 
 
 def save_flight(
@@ -202,8 +287,16 @@ def save_flight(
     if isinstance(price_info, dict):
         status = price_info.get("status")
 
+    flight_key = create_flight_key(
+        origin,
+        destination,
+        departure_date,
+        flight
+    )
+
     connection.execute("""
         INSERT INTO prices (
+            flight_key,
             origin,
             destination,
             departure_date,
@@ -218,8 +311,9 @@ def save_flight(
             source,
             recorded_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
+        flight_key,
         origin,
         destination,
         departure_date,
@@ -237,29 +331,23 @@ def save_flight(
 
     connection.commit()
 
+    return flight_key
+
 
 def get_history(
     connection,
-    origin,
-    destination,
-    departure_date
+    flight_key
 ):
     cursor = connection.execute("""
         SELECT price
         FROM prices
-        WHERE origin = ?
-          AND destination = ?
-          AND departure_date = ?
+        WHERE flight_key = ?
           AND currency = 'TRY'
           AND price IS NOT NULL
           AND price > 0
         ORDER BY id DESC
         LIMIT 100
-    """, (
-        origin,
-        destination,
-        departure_date
-    ))
+    """, (flight_key,))
 
     return [
         float(row[0])
@@ -269,9 +357,7 @@ def get_history(
 
 def calculate_error_score(
     connection,
-    origin,
-    destination,
-    departure_date,
+    flight_key,
     current_price,
     settings
 ):
@@ -279,49 +365,30 @@ def calculate_error_score(
 
     history = get_history(
         connection,
-        origin,
-        destination,
-        departure_date
+        flight_key
     )
 
-    # Henüz yeterli geçmiş yoksa güvenilir
-    # tarihsel karşılaştırma yapmıyoruz.
     if len(history) < 3:
         return {
             "total": 0,
             "band": "veri yetersiz",
             "historical": 0,
-            "market": 0,
             "sudden_drop": 0,
-            "source_disagreement": 0,
-            "tax": 0,
-            "currency": 0,
-            "fare": 0,
-            "short_lived": 0,
-            "reliability": 0,
             "average": None,
             "drop_percent": None,
             "history_count": len(history)
         }
 
     average = sum(history) / len(history)
-    minimum = min(history)
 
     if average <= 0:
         return {
             "total": 0,
             "band": "veri yetersiz",
             "historical": 0,
-            "market": 0,
             "sudden_drop": 0,
-            "source_disagreement": 0,
-            "tax": 0,
-            "currency": 0,
-            "fare": 0,
-            "short_lived": 0,
-            "reliability": 0,
-            "average": average,
-            "drop_percent": 0,
+            "average": None,
+            "drop_percent": None,
             "history_count": len(history)
         }
 
@@ -330,7 +397,6 @@ def calculate_error_score(
         / average
     ) * 100
 
-    # 1. Tarihsel anomali - 20 puan
     historical_score = min(
         weights["historical_anomaly"],
         max(
@@ -340,14 +406,9 @@ def calculate_error_score(
         )
     )
 
-    # 2. Piyasa karşılaştırması
-    # İkinci kaynak henüz eklenmedi.
-    market_score = 0
-
-    # 3. Ani düşüş
     sudden_drop_score = 0
 
-    if len(history) >= 2:
+    if len(history) >= 1:
         previous = history[0]
 
         if previous > 0:
@@ -365,41 +426,12 @@ def calculate_error_score(
                 )
             )
 
-    # 4. Kaynaklar arası fark
-    source_disagreement_score = 0
-
-    # 5. Vergi / ücret anomalisi
-    tax_score = 0
-
-    # 6. Kur anomalisi
-    currency_score = 0
-
-    # 7. Fare anomalisi
-    fare_score = 0
-
-    # 8. Kısa süreli fiyat
-    short_lived_score = 0
-
-    # 9. Kaynak güvenilirliği
-    # Şimdilik Ignav verisinin API cevabını
-    # başarıyla almamız yalnız başına
-    # "yüksek güven" anlamına gelmez.
-    reliability_score = 0
-
-    total = (
-        historical_score
-        + market_score
-        + sudden_drop_score
-        + source_disagreement_score
-        + tax_score
-        + currency_score
-        + fare_score
-        + short_lived_score
-        + reliability_score
-    )
-
     total = round(
-        min(100, max(0, total)),
+        min(
+            100,
+            historical_score
+            + sudden_drop_score
+        ),
         1
     )
 
@@ -419,25 +451,21 @@ def calculate_error_score(
     return {
         "total": total,
         "band": band,
-        "historical": round(historical_score, 1),
-        "market": round(market_score, 1),
-        "sudden_drop": round(sudden_drop_score, 1),
-        "source_disagreement": round(
-            source_disagreement_score, 1
+        "historical": round(
+            historical_score,
+            1
         ),
-        "tax": round(tax_score, 1),
-        "currency": round(currency_score, 1),
-        "fare": round(fare_score, 1),
-        "short_lived": round(
-            short_lived_score, 1
+        "sudden_drop": round(
+            sudden_drop_score,
+            1
         ),
-        "reliability": round(
-            reliability_score, 1
+        "average": round(
+            average,
+            2
         ),
-        "average": round(average, 2),
-        "minimum": round(minimum, 2),
         "drop_percent": round(
-            drop_percent, 1
+            drop_percent,
+            1
         ),
         "history_count": len(history)
     }
@@ -509,11 +537,16 @@ def main():
             if currency != "TRY":
                 continue
 
-            score = calculate_error_score(
-                connection,
+            flight_key = create_flight_key(
                 origin,
                 destination,
                 departure_date,
+                flight
+            )
+
+            score = calculate_error_score(
+                connection,
+                flight_key,
                 price,
                 settings
             )
@@ -533,19 +566,31 @@ def main():
                 f"  {origin} -> {destination}"
             )
             print(
-                f"  Fiyat: {price:.0f} {currency}"
+                f"  Uçuş: "
+                f"{get_airline(flight)} "
+                f"{get_flight_number(flight)}"
+            )
+            print(
+                f"  Fiyat: "
+                f"{price:.0f} {currency}"
+            )
+            print(
+                f"  Flight Key: "
+                f"{flight_key[:12]}..."
             )
             print(
                 f"  Error Score: "
                 f"{score['total']}/100"
             )
             print(
-                f"  Durum: {score['band']}"
+                f"  Durum: "
+                f"{score['band']}"
             )
 
             if score["average"] is not None:
                 print(
-                    f"  Normal ortalama: "
+                    f"  Bu uçuşun normal "
+                    f"ortalaması: "
                     f"{score['average']:.0f} TRY"
                 )
                 print(
@@ -556,13 +601,6 @@ def main():
             print(
                 f"  Geçmiş kayıt: "
                 f"{score['history_count']}"
-            )
-
-            print(
-                "  Puan dağılımı: "
-                f"Tarihsel={score['historical']} | "
-                f"Ani düşüş={score['sudden_drop']} | "
-                f"Piyasa={score['market']}"
             )
 
         print()
@@ -577,7 +615,7 @@ def main():
         total_saved
     )
     print(
-        "100 puanlık Error Score aktif."
+        "Uçuş kimliği sistemi aktif."
     )
 
 
