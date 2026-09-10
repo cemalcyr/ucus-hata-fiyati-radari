@@ -1,0 +1,84 @@
+{
+  "system": {
+    "name": "Uçuş Hata Fiyatı Radarı",
+    "currency": "TRY",
+    "api_budget_tl": 0,
+    "paid_api_allowed": false
+  },
+
+  "airports": {
+    "priority_origins": ["SZF"],
+    "priority_destinations": ["SZF"],
+    "domestic_enabled": true,
+    "europe_enabled": true
+  },
+
+  "trip": {
+    "one_way": true,
+    "round_trip": true
+  },
+
+  "passengers": {
+    "adults": 1,
+    "children": 0,
+    "infants": 0
+  },
+
+  "cabin": {
+    "economy": true,
+    "business": false
+  },
+
+  "connections": {
+    "direct": true,
+    "one_connection": true,
+    "two_connections": false,
+    "max_connections": 1,
+    "self_transfer": false,
+    "airport_change_warning": true
+  },
+
+  "baggage": {
+    "show_included": true,
+    "prefer_checked_baggage": true
+  },
+
+  "price": {
+    "maximum_try": 0,
+    "compare_total_price": true,
+    "include_taxes": true,
+    "include_mandatory_fees": true
+  },
+
+  "airlines": {
+    "disabled": []
+  },
+
+  "scoring": {
+    "error_score": {
+      "historical_anomaly": 20,
+      "market_divergence": 25,
+      "sudden_drop": 10,
+      "source_disagreement": 10,
+      "tax_anomaly": 10,
+      "currency_anomaly": 5,
+      "fare_anomaly": 5,
+      "short_lived_persistence": 5,
+      "source_reliability": 5
+    },
+
+    "thresholds": {
+      "normal": 30,
+      "good_deal": 50,
+      "suspicious": 70,
+      "candidate": 85,
+      "high_confidence": 90
+    }
+  },
+
+  "alerts": {
+    "enabled": true,
+    "telegram_enabled": false,
+    "critical_override_quiet_hours": true
+  }
+}
