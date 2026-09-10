@@ -177,16 +177,6 @@ def init_db():
         )
     """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS api_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            used_at TEXT NOT NULL,
-            endpoint TEXT,
-            success INTEGER DEFAULT 0,
-            estimated_cost_usd REAL DEFAULT 0
-        )
-    """)
-
     if cur.execute("SELECT 1 FROM radar_state WHERE id=1").fetchone() is None:
         cur.execute(
             "INSERT INTO radar_state(id, route_index, updated_at) VALUES(1,0,?)",
@@ -314,9 +304,7 @@ def api_call_allowed():
         # aÅŸmayÄ± Ã¶nlemek iÃ§in kalÄ±cÄ± sayaÃ§ tutuyoruz.
         conn = get_connection()
         ensure_usage_table(conn)
-        count = conn.execute(
-            "SELECT COUNT(*) FROM api_usage WHERE success=1"
-        ).fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0]
         conn.close()
         return count < 1000
 
@@ -924,102 +912,20 @@ def historical_anomaly(flight):
 
 def market_divergence(flight):
     baseline, count, _ = baseline_for(flight)
-    if baseline and baseline > 0:
-        ratio = flight["price"] / baseline
-        if ratio <= 0.50:
-            return 25
-        if ratio <= 0.65:
-            return 20
-        if ratio <= 0.75:
-            return 15
-        if ratio <= 0.85:
-            return 10
-        if ratio <= 0.92:
-            return 5
-
-    return 0
-
-
-def search_market_context(flights):
-    """
-    AynÄ± Ignav aramasÄ±ndan gelen benzersiz itinerary'lerin fiyat
-    daÄŸÄ±lÄ±mÄ±nÄ± Ã§Ä±karÄ±r. Yeni uÃ§uÅŸlarda geÃ§miÅŸ fiyat yoksa bile
-    mevcut pazarÄ±n iÃ§indeki konumu Ã¶lÃ§memizi saÄŸlar.
-    """
-    prices = [
-        float(f["price"])
-        for f in flights
-        if f.get("price") is not None and float(f["price"]) > 0
-    ]
-
-    if len(prices) < 3:
-        return {
-            "count": len(prices),
-            "median": None,
-            "min": min(prices) if prices else None,
-            "currency": "",
-        }
-
-    # Market TR olduÄŸunda Ignav fiyatlarÄ± TRY olarak dÃ¶ndÃ¼rÃ¼r.
-    # FarklÄ± currency'ler karÄ±ÅŸÄ±rsa gÃ¼venli tarafta kalmak iÃ§in
-    # karÅŸÄ±laÅŸtÄ±rmayÄ± yalnÄ±zca baskÄ±n currency ile yap.
-    currencies = [
-        normalize(f.get("currency"))
-        for f in flights
-        if f.get("currency")
-    ]
-    dominant_currency = ""
-    if currencies:
-        dominant_currency = max(set(currencies), key=currencies.count)
-
-    filtered = [
-        float(f["price"])
-        for f in flights
-        if f.get("price") is not None
-        and float(f["price"]) > 0
-        and normalize(f.get("currency")) == dominant_currency
-    ]
-
-    if len(filtered) < 3:
-        return {
-            "count": len(filtered),
-            "median": None,
-            "min": min(filtered) if filtered else None,
-            "currency": dominant_currency,
-        }
-
-    return {
-        "count": len(filtered),
-        "median": statistics.median(filtered),
-        "min": min(filtered),
-        "currency": dominant_currency,
-    }
-
-
-def same_search_anomaly(flight, context):
-    """
-    Ä°lk kez gÃ¶rÃ¼len uÃ§uÅŸlarda tarihsel veri yoksa bu puan devreye girer.
-    Fiyat, aynÄ± aramadaki medyanÄ±n belirgin ÅŸekilde altÄ±ndaysa puan verir.
-    """
-    median = context.get("median")
-    count = int(context.get("count", 0) or 0)
-
-    if not median or median <= 0 or count < 3:
+    if not baseline or baseline <= 0:
         return 0
 
-    ratio = flight["price"] / median
-
-    if ratio <= 0.45:
-        return 15
-    if ratio <= 0.55:
-        return 12
+    ratio = flight["price"] / baseline
+    if ratio <= 0.50:
+        return 25
     if ratio <= 0.65:
-        return 9
+        return 20
     if ratio <= 0.75:
-        return 6
+        return 15
     if ratio <= 0.85:
-        return 3
-
+        return 10
+    if ratio <= 0.92:
+        return 5
     return 0
 
 
@@ -1084,14 +990,10 @@ def short_lived_persistence(flight):
     return 2 if count == 1 else 0
 
 
-def calculate_score(flight, verification, market_context=None):
+def calculate_score(flight, verification):
     components = {
         "historical_anomaly": historical_anomaly(flight),
         "market_divergence": market_divergence(flight),
-        "same_search_anomaly": same_search_anomaly(
-            flight,
-            market_context or {},
-        ),
         "sudden_drop": sudden_drop(flight),
         "source_disagreement": verification.get("source_disagreement_points", 0),
         # Ignav standart response'unda ayri tax/fee satirlari yok.
@@ -1359,32 +1261,43 @@ def already_alerted(flight):
     return row is not None
 
 
+def telegram_configured():
+    return bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"))
+
+
 def telegram_send(message):
     if not settings.get("alerts", {}).get("telegram_enabled", True):
+        print("Telegram devre disi.")
         return False
-
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
     if not token or not chat_id:
-        print("Telegram secretleri bulunamadi.")
+        print("Telegram BASARISIZ: secret eksik.")
         return False
-
     try:
         response = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": message,
-                "disable_web_page_preview": True,
-            },
+            json={"chat_id": chat_id, "text": message[:4090], "disable_web_page_preview": True},
             timeout=30,
         )
-        print("Telegram:", response.status_code)
-        return response.status_code == 200
+        if response.status_code == 200:
+            print("Telegram: mesaj gonderildi.")
+            return True
+        print("Telegram HTTP hata:", response.status_code, response.text[:500])
+        return False
     except Exception as exc:
         print("Telegram hata:", repr(exc))
         return False
+
+
+def telegram_test():
+    if not telegram_configured():
+        print("TELEGRAM TEST: BASARISIZ - secret eksik.")
+        return False
+    print("TELEGRAM TEST: secretlar mevcut.")
+    ok = telegram_send("ğŸš¨ UÃ‡UÅ HATA FÄ°YATI RADARI V3.4\nTelegram baÄŸlantÄ± testi baÅŸarÄ±lÄ±.\nBildirim kanalÄ± aktif.")
+    print("TELEGRAM TEST SONUCU:", "BASARILI" if ok else "BASARISIZ")
+    return ok
 
 
 def make_alert_message(flight, score, opportunity, verification):
@@ -1504,10 +1417,16 @@ def create_and_send_alert(flight, score, opportunity, verification):
 
 def main():
     print("=" * 60)
-    print("UÃ‡UÅ HATA FÄ°YATI RADARI V3.1")
+    print("UÃ‡UÅ HATA FÄ°YATI RADARI V3.4")
     print("=" * 60)
 
     init_db()
+
+    telegram_ready = telegram_configured()
+    print("Telegram yapilandirilmis:", "EVET" if telegram_ready else "HAYIR")
+    telegram_test_result = None
+    if os.getenv("TELEGRAM_TEST", "0") == "1":
+        telegram_test_result = telegram_test()
 
     routes = build_routes()
     batch_size = int(
@@ -1583,19 +1502,11 @@ def main():
                 )
 
                 flights_found += len(flights)
-                market_context = search_market_context(flights)
+                print(f"Bulunan benzersiz itinerary: {len(flights)}")
 
-                print(
-                    f"Bulunan benzersiz itinerary: {len(flights)} | "
-                    f"Piyasa medyani: "
-                    f"{market_context['median']:.0f} {market_context.get('currency', '')}"
-                    if market_context.get("median") is not None
-                    else f"Bulunan benzersiz itinerary: {len(flights)}"
-                )
-
-                # Skorlamadan once kaydetmiyoruz.
-                # Boylece mevcut gozlem kendi baseline'ini bozmaz.
                 for flight in flights:
+                    # Skorlamadan once kaydetmiyoruz.
+                    # Boylece mevcut gozlem kendi baseline'ini bozmaz.
                     preliminary_verification = {
                         "source_disagreement_points": 0,
                         "reliability_points": 0,
@@ -1604,7 +1515,6 @@ def main():
                     preliminary_score, _ = calculate_score(
                         flight,
                         preliminary_verification,
-                        market_context,
                     )
 
                     verification = {
@@ -1637,7 +1547,6 @@ def main():
                     score, components = calculate_score(
                         flight,
                         verification,
-                        market_context,
                     )
 
                     opportunity = opportunity_score(flight)
@@ -1663,13 +1572,15 @@ def main():
                         alerts += 1
 
     print("\n" + "=" * 60)
-    print("V3 CALISMA OZETI")
+    print("V3.4 CALISMA OZETI")
     print("=" * 60)
     print(f"API aramasi: {searches}")
     print(f"Ucus/itinerary: {flights_found}")
     print(f"Dogrulama: {verified}")
     print(f"Booking kontrolu: {booking_checks}")
     print(f"Telegram alarmi: {alerts}")
+    if telegram_test_result is not None:
+        print("Telegram test:", "BASARILI" if telegram_test_result else "BASARISIZ")
     print("=" * 60)
 
 
