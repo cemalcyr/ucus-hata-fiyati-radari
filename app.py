@@ -177,6 +177,16 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS api_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            used_at TEXT NOT NULL,
+            endpoint TEXT,
+            success INTEGER DEFAULT 0,
+            estimated_cost_usd REAL DEFAULT 0
+        )
+    """)
+
     if cur.execute("SELECT 1 FROM radar_state WHERE id=1").fetchone() is None:
         cur.execute(
             "INSERT INTO radar_state(id, route_index, updated_at) VALUES(1,0,?)",
@@ -304,7 +314,9 @@ def api_call_allowed():
         # aÅŸmayÄ± Ã¶nlemek iÃ§in kalÄ±cÄ± sayaÃ§ tutuyoruz.
         conn = get_connection()
         ensure_usage_table(conn)
-        count = conn.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0]
+        count = conn.execute(
+            "SELECT COUNT(*) FROM api_usage WHERE success=1"
+        ).fetchone()[0]
         conn.close()
         return count < 1000
 
@@ -912,20 +924,102 @@ def historical_anomaly(flight):
 
 def market_divergence(flight):
     baseline, count, _ = baseline_for(flight)
-    if not baseline or baseline <= 0:
+    if baseline and baseline > 0:
+        ratio = flight["price"] / baseline
+        if ratio <= 0.50:
+            return 25
+        if ratio <= 0.65:
+            return 20
+        if ratio <= 0.75:
+            return 15
+        if ratio <= 0.85:
+            return 10
+        if ratio <= 0.92:
+            return 5
+
+    return 0
+
+
+def search_market_context(flights):
+    """
+    AynÄ± Ignav aramasÄ±ndan gelen benzersiz itinerary'lerin fiyat
+    daÄŸÄ±lÄ±mÄ±nÄ± Ã§Ä±karÄ±r. Yeni uÃ§uÅŸlarda geÃ§miÅŸ fiyat yoksa bile
+    mevcut pazarÄ±n iÃ§indeki konumu Ã¶lÃ§memizi saÄŸlar.
+    """
+    prices = [
+        float(f["price"])
+        for f in flights
+        if f.get("price") is not None and float(f["price"]) > 0
+    ]
+
+    if len(prices) < 3:
+        return {
+            "count": len(prices),
+            "median": None,
+            "min": min(prices) if prices else None,
+            "currency": "",
+        }
+
+    # Market TR olduÄŸunda Ignav fiyatlarÄ± TRY olarak dÃ¶ndÃ¼rÃ¼r.
+    # FarklÄ± currency'ler karÄ±ÅŸÄ±rsa gÃ¼venli tarafta kalmak iÃ§in
+    # karÅŸÄ±laÅŸtÄ±rmayÄ± yalnÄ±zca baskÄ±n currency ile yap.
+    currencies = [
+        normalize(f.get("currency"))
+        for f in flights
+        if f.get("currency")
+    ]
+    dominant_currency = ""
+    if currencies:
+        dominant_currency = max(set(currencies), key=currencies.count)
+
+    filtered = [
+        float(f["price"])
+        for f in flights
+        if f.get("price") is not None
+        and float(f["price"]) > 0
+        and normalize(f.get("currency")) == dominant_currency
+    ]
+
+    if len(filtered) < 3:
+        return {
+            "count": len(filtered),
+            "median": None,
+            "min": min(filtered) if filtered else None,
+            "currency": dominant_currency,
+        }
+
+    return {
+        "count": len(filtered),
+        "median": statistics.median(filtered),
+        "min": min(filtered),
+        "currency": dominant_currency,
+    }
+
+
+def same_search_anomaly(flight, context):
+    """
+    Ä°lk kez gÃ¶rÃ¼len uÃ§uÅŸlarda tarihsel veri yoksa bu puan devreye girer.
+    Fiyat, aynÄ± aramadaki medyanÄ±n belirgin ÅŸekilde altÄ±ndaysa puan verir.
+    """
+    median = context.get("median")
+    count = int(context.get("count", 0) or 0)
+
+    if not median or median <= 0 or count < 3:
         return 0
 
-    ratio = flight["price"] / baseline
-    if ratio <= 0.50:
-        return 25
-    if ratio <= 0.65:
-        return 20
-    if ratio <= 0.75:
+    ratio = flight["price"] / median
+
+    if ratio <= 0.45:
         return 15
+    if ratio <= 0.55:
+        return 12
+    if ratio <= 0.65:
+        return 9
+    if ratio <= 0.75:
+        return 6
     if ratio <= 0.85:
-        return 10
-    if ratio <= 0.92:
-        return 5
+        return 3
+
     return 0
 
 
@@ -990,10 +1084,14 @@ def short_lived_persistence(flight):
     return 2 if count == 1 else 0
 
 
-def calculate_score(flight, verification):
+def calculate_score(flight, verification, market_context=None):
     components = {
         "historical_anomaly": historical_anomaly(flight),
         "market_divergence": market_divergence(flight),
+        "same_search_anomaly": same_search_anomaly(
+            flight,
+            market_context or {},
+        ),
         "sudden_drop": sudden_drop(flight),
         "source_disagreement": verification.get("source_disagreement_points", 0),
         # Ignav standart response'unda ayri tax/fee satirlari yok.
@@ -1406,7 +1504,7 @@ def create_and_send_alert(flight, score, opportunity, verification):
 
 def main():
     print("=" * 60)
-    print("UÃ‡UÅ HATA FÄ°YATI RADARI V3")
+    print("UÃ‡UÅ HATA FÄ°YATI RADARI V3.1")
     print("=" * 60)
 
     init_db()
@@ -1485,11 +1583,19 @@ def main():
                 )
 
                 flights_found += len(flights)
-                print(f"Bulunan benzersiz itinerary: {len(flights)}")
+                market_context = search_market_context(flights)
 
+                print(
+                    f"Bulunan benzersiz itinerary: {len(flights)} | "
+                    f"Piyasa medyani: "
+                    f"{market_context['median']:.0f} {market_context.get('currency', '')}"
+                    if market_context.get("median") is not None
+                    else f"Bulunan benzersiz itinerary: {len(flights)}"
+                )
+
+                # Skorlamadan once kaydetmiyoruz.
+                # Boylece mevcut gozlem kendi baseline'ini bozmaz.
                 for flight in flights:
-                    # Skorlamadan once kaydetmiyoruz.
-                    # Boylece mevcut gozlem kendi baseline'ini bozmaz.
                     preliminary_verification = {
                         "source_disagreement_points": 0,
                         "reliability_points": 0,
@@ -1498,6 +1604,7 @@ def main():
                     preliminary_score, _ = calculate_score(
                         flight,
                         preliminary_verification,
+                        market_context,
                     )
 
                     verification = {
@@ -1530,6 +1637,7 @@ def main():
                     score, components = calculate_score(
                         flight,
                         verification,
+                        market_context,
                     )
 
                     opportunity = opportunity_score(flight)
