@@ -16,7 +16,11 @@ SETTINGS_FILE = os.getenv(
     os.path.join(BASE_DIR, "config", "settings.json"),
 )
 IGNAV_BASE = "https://ignav.com/api"
+SERPAPI_BASE = "https://serpapi.com/search"
 
+# Flight price provider: SerpApi (Google Flights) is preferred when a key is present.
+# IGNAV remains as a legacy fallback, but is no longer required.
+SERPAPI_KEY = os.getenv("SERPAPI_API_KEY", "").strip()
 IGNAV_BILLING_BLOCKED = False
 SESSION = requests.Session()
 
@@ -649,23 +653,166 @@ def ignav_post(endpoint, payload, retry=True):
     return None
 
 
-def ignav_search(
-    origin,
-    destination,
-    departure_date,
-    return_date=None,
-):
-    payload = common_payload(
-        origin, destination, departure_date
-    )
-
+def _serpapi_params(origin, destination, departure_date, return_date=None, departure_token=None):
+    passengers = settings.get("passengers", {})
+    cabin_cfg = settings.get("cabin", {})
+    cabin = 3 if cabin_cfg.get("business", False) else 1
+    params = {
+        "engine": "google_flights",
+        "api_key": SERPAPI_KEY,
+        "departure_id": normalize(origin),
+        "arrival_id": normalize(destination),
+        "type": 1 if return_date else 2,
+        "outbound_date": departure_date,
+        "currency": system_cfg().get("currency", "TRY"),
+        "gl": "tr",
+        "hl": "tr",
+        "travel_class": cabin,
+        "adults": safe_int(passengers.get("adults", 1), 1) or 1,
+        "children": safe_int(passengers.get("children", 0), 0) or 0,
+        "show_hidden": "true",
+    }
     if return_date:
-        payload["return_date"] = return_date
-        endpoint = "/fares/round-trip"
-    else:
-        endpoint = "/fares/one-way"
+        params["return_date"] = return_date
+    if departure_token:
+        params["departure_token"] = departure_token
+        # SerpApi's departure-token request must not be treated as a fresh date search.
+        params.pop("outbound_date", None)
+        params.pop("return_date", None)
+    return params
 
-    return ignav_post(endpoint, payload)
+
+def _serpapi_request(params):
+    if not SERPAPI_KEY:
+        print("SERPAPI_API_KEY bulunamadi.")
+        return None
+    try:
+        response = SESSION.get(
+            SERPAPI_BASE,
+            params=params,
+            timeout=(15, 60),
+        )
+        if response.status_code != 200:
+            print("SERPAPI HTTP hata:", response.status_code, response.text[:500])
+            return None
+        data = response.json()
+        if not isinstance(data, dict):
+            print("SERPAPI gecersiz JSON.")
+            return None
+        if data.get("error"):
+            print("SERPAPI hata:", str(data.get("error"))[:500])
+            return None
+        return data
+    except (requests.Timeout, requests.ConnectionError) as exc:
+        print("SERPAPI baglanti hatasi:", repr(exc))
+        return None
+    except Exception as exc:
+        print("SERPAPI beklenmeyen hata:", repr(exc))
+        return None
+
+
+def _google_item_to_itinerary(item, origin, destination, departure_date, return_date=None, booking_url=None):
+    if not isinstance(item, dict):
+        return None
+    segments = []
+    for g in item.get("flights", []) or []:
+        if not isinstance(g, dict):
+            continue
+        dep = g.get("departure_airport") or {}
+        arr = g.get("arrival_airport") or {}
+        airline = g.get("airline") or ""
+        flight_no = g.get("flight_number") or ""
+        segments.append({
+            "departure_airport": dep.get("id") or "",
+            "arrival_airport": arr.get("id") or "",
+            "marketing_carrier_code": airline,
+            "flight_number": flight_no,
+            "departure_time_local": dep.get("time") or "",
+            "arrival_time_local": arr.get("time") or "",
+            "duration_minutes": g.get("duration"),
+            "airplane": g.get("airplane"),
+        })
+    if not segments:
+        return None
+    price = safe_float(item.get("price"))
+    if price is None or price <= 0:
+        return None
+    currency = system_cfg().get("currency", "TRY")
+    outbound = {
+        "segments": segments,
+        "duration_minutes": safe_int(item.get("total_duration"), 0) or 0,
+    }
+    return {
+        "price": {"amount": price, "currency": currency, "status": "LIVE"},
+        "outbound": outbound,
+        "inbound": None,
+        "requires_self_transfer": False,
+        "ignav_id": "",
+        "booking_url": booking_url or "",
+        "google_booking_token": item.get("booking_token") or "",
+        "google_departure_token": item.get("departure_token") or "",
+    }
+
+
+def _combine_google_roundtrip(outbound_item, return_item, origin, destination, departure_date, return_date, booking_url=None):
+    out = _google_item_to_itinerary(outbound_item, origin, destination, departure_date, return_date, booking_url)
+    ret = _google_item_to_itinerary(return_item, destination, origin, return_date, departure_date, booking_url)
+    if not out or not ret:
+        return None
+    out["inbound"] = ret["outbound"]
+    out["price"]["amount"] = safe_float(return_item.get("price")) or safe_float(outbound_item.get("price"))
+    out["google_booking_token"] = return_item.get("booking_token") or outbound_item.get("booking_token") or ""
+    return out
+
+
+def serpapi_search(origin, destination, departure_date, return_date=None):
+    if not SERPAPI_KEY:
+        return None
+    print("SERPAPI araniyor:", origin, "->", destination, departure_date, ("/" + return_date) if return_date else "")
+    params = _serpapi_params(origin, destination, departure_date, return_date)
+    first = _serpapi_request(params)
+    if not first:
+        return None
+    booking_url = first.get("google_flights_url") or ""
+
+    if not return_date:
+        items = (first.get("best_flights") or []) + (first.get("other_flights") or [])
+        itineraries = []
+        for item in items:
+            converted = _google_item_to_itinerary(item, origin, destination, departure_date, None, booking_url)
+            if converted:
+                itineraries.append(converted)
+        return {"itineraries": itineraries, "provider": "SERPAPI", "google_flights_url": booking_url}
+
+    # Google Flights returns outbound options first. Use a small number of departure tokens
+    # to fetch the corresponding return options, keeping the free tier practical.
+    itineraries = []
+    outbound_items = (first.get("best_flights") or []) + (first.get("other_flights") or [])
+    max_options = safe_int(os.getenv("SERPAPI_ROUNDTRIP_OPTIONS", "3"), 3) or 3
+    for outbound in outbound_items[:max_options]:
+        token = outbound.get("departure_token")
+        if not token:
+            continue
+        second = _serpapi_request(_serpapi_params(origin, destination, departure_date, return_date, token))
+        if not second:
+            continue
+        return_items = (second.get("best_flights") or []) + (second.get("other_flights") or [])
+        for ret in return_items[:3]:
+            combined = _combine_google_roundtrip(
+                outbound, ret, origin, destination, departure_date, return_date, booking_url
+            )
+            if combined:
+                itineraries.append(combined)
+    return {"itineraries": itineraries, "provider": "SERPAPI", "google_flights_url": booking_url}
+
+
+def ignav_search(origin, destination, departure_date, return_date=None):
+    # IGNAV is deliberately no longer used by the radar. If SerpApi is missing,
+    # stop cleanly instead of sending requests to an account that returns 402.
+    if not SERPAPI_KEY:
+        print("SERPAPI_API_KEY eksik: IGNAV devre disi; arama atlandi.")
+        return None
+    return serpapi_search(origin, destination, departure_date, return_date)
 
 
 def get_booking_links(ignav_id):
@@ -842,6 +989,7 @@ def itinerary_to_flight(
         "ignav_id": str(
             itinerary.get("ignav_id") or ""
         ).strip() or None,
+        "booking_url": str(itinerary.get("booking_url") or "").strip() or None,
         "stops": stops,
         "departure_time": (
             first.get("departure_time_local")
@@ -1596,53 +1744,40 @@ def verify_flight(flight, do_booking=False):
         "booking_verified": False,
         "source_disagreement_points": 0,
         "reliability_points": 0,
-        "booking_url": None,
+        "booking_url": flight.get("booking_url"),
         "reason": "",
     }
 
-    # Ayni aramayi ikinci kez yapmak yerine, sadece adayin
-    # mevcut ignav_id'sini booking-links ile dogrulama secenegine
-    # sahibiz. Fakat booking kontrolu istenmiyorsa, arama sonucunun
-    # kendi price.status bilgisine guvenilir.
-    status = normalize(flight.get("price_status"))
+    # SerpApi/Google Flights returns a live search result. We treat that result as
+    # the current-source verification instead of the old IGNAV VERIFIED flag.
+    if SERPAPI_KEY and flight.get("price_status") == "LIVE":
+        result["verified"] = True
+        result["reliability_points"] = 5
+        result["reason"] = "Google Flights canli arama sonucu SerpApi ile alindi."
+        if flight.get("booking_url"):
+            result["booking_verified"] = True
+            result["booking_url"] = flight.get("booking_url")
+            result["reliability_points"] += 2
+        return result
 
+    status = normalize(flight.get("price_status"))
     if status == "VERIFIED":
         result["verified"] = True
         result["reliability_points"] += 3
-        result["reason"] = (
-            "IGNAV fiyat durumu VERIFIED olarak dondu."
-        )
+        result["reason"] = "IGNAV fiyat durumu VERIFIED olarak dondu."
     else:
-        # IGNAV status alaninin yoklugu otomatik olarak "yanlis"
-        # sayilmaz; ancak yuksek guven puani verilmez.
-        result["reason"] = (
-            "IGNAV fiyat durumu VERIFIED degil veya belirtilmemis."
-        )
+        result["reason"] = "Fiyat kaynagi VERIFIED degil veya belirtilmemis."
 
     if do_booking and flight.get("ignav_id"):
-        booking = get_booking_links(
-            flight["ignav_id"]
-        )
-        booking_ok, disagreement, url = booking_analysis(
-            booking,
-            flight,
-        )
-
+        booking = get_booking_links(flight["ignav_id"])
+        booking_ok, disagreement, url = booking_analysis(booking, flight)
         result["booking_verified"] = booking_ok
         result["source_disagreement_points"] = disagreement
         result["booking_url"] = url
-
         if booking_ok:
             result["reliability_points"] += 2
-            if result["verified"]:
-                result["reason"] += (
-                    " Booking linkleri de alindi."
-                )
-            else:
-                result["reason"] += (
-                    " Booking linkleri bulundu."
-                )
 
+    return result
     save_verification(
         flight,
         result["verified"],
@@ -2094,12 +2229,18 @@ def main():
     api_key_ready = bool(
         os.getenv("IGNAV_API_KEY", "").strip()
     )
+    serpapi_ready = bool(SERPAPI_KEY)
     telegram_ready = telegram_configured()
 
     print(
-        "IGNAV API key:",
+        "SERPAPI API key:",
+        "EVET" if serpapi_ready else "HAYIR",
+    )
+    print(
+        "IGNAV API key (legacy):",
         "EVET" if api_key_ready else "HAYIR",
     )
+    print("Aktif ucus veri saglayici:", "SERPAPI / GOOGLE FLIGHTS" if serpapi_ready else "IGNAV (legacy)")
     print(
         "Telegram yapilandirilmis:",
         "EVET" if telegram_ready else "HAYIR",
@@ -2354,9 +2495,9 @@ def main():
     print(
         "IGNAV faturalandirma:",
         (
-            "GEREKLI - 402"
-            if IGNAV_BILLING_BLOCKED
-            else "NORMAL"
+            "KULLANILMIYOR - SERPAPI AKTIF"
+            if serpapi_ready
+            else ("GEREKLI - 402" if IGNAV_BILLING_BLOCKED else "NORMAL")
         ),
     )
 
