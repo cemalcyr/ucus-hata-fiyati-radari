@@ -1,8 +1,8 @@
 import os
-import sys
 import sqlite3
 import threading
 import time
+import traceback
 import importlib.util
 from datetime import datetime, timezone
 
@@ -17,7 +17,10 @@ BASE_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..")
 )
 
-DB_PATH = os.path.join(BASE_DIR, "prices.db")
+DB_PATH = os.path.join(
+    BASE_DIR,
+    "prices.db"
+)
 
 app = Flask(__name__)
 
@@ -35,8 +38,72 @@ radar_last_finish = None
 radar_last_error = None
 
 RADAR_INTERVAL_MINUTES = int(
-    os.getenv("RADAR_INTERVAL_MINUTES", "30")
+    os.getenv(
+        "RADAR_INTERVAL_MINUTES",
+        "30"
+    )
 )
+
+
+# ============================================================
+# SAĞLAYICI DURUMU
+# ============================================================
+
+def get_serpapi_key():
+    return os.getenv(
+        "SERPAPI_API_KEY",
+        ""
+    ).strip()
+
+
+def get_ignav_key():
+    return os.getenv(
+        "IGNAV_API_KEY",
+        ""
+    ).strip()
+
+
+def get_telegram_token():
+    return os.getenv(
+        "TELEGRAM_BOT_TOKEN",
+        ""
+    ).strip()
+
+
+def get_telegram_chat_id():
+    return os.getenv(
+        "TELEGRAM_CHAT_ID",
+        ""
+    ).strip()
+
+
+def get_provider_status():
+
+    serpapi_configured = bool(
+        get_serpapi_key()
+    )
+
+    ignav_configured = bool(
+        get_ignav_key()
+    )
+
+    return {
+        "active_provider": (
+            "SERPAPI / GOOGLE FLIGHTS"
+            if serpapi_configured
+            else "SERPAPI API KEY EKSIK"
+        ),
+        "serpapi": (
+            "OK"
+            if serpapi_configured
+            else "NOT_CONFIGURED"
+        ),
+        "ignav_legacy": (
+            "CONFIGURED"
+            if ignav_configured
+            else "NOT_CONFIGURED"
+        )
+    }
 
 
 # ============================================================
@@ -44,9 +111,7 @@ RADAR_INTERVAL_MINUTES = int(
 # ============================================================
 
 def get_db():
-    """
-    SQLite veritabanı bağlantısı oluşturur.
-    """
+
     conn = sqlite3.connect(
         DB_PATH,
         timeout=30,
@@ -59,13 +124,12 @@ def get_db():
 
 
 def get_tables():
-    """
-    Veritabanındaki tabloları döndürür.
-    """
+
     if not os.path.exists(DB_PATH):
         return []
 
     try:
+
         conn = get_db()
 
         rows = conn.execute(
@@ -79,17 +143,26 @@ def get_tables():
 
         conn.close()
 
-        return [row["name"] for row in rows]
+        return [
+            row["name"]
+            for row in rows
+        ]
 
-    except Exception:
+    except Exception as e:
+
+        print(
+            "Tablo listesi okunamadi:",
+            repr(e),
+            flush=True
+        )
+
         return []
 
 
 def get_table_columns(table_name):
-    """
-    Belirtilen tablonun kolonlarını döndürür.
-    """
+
     try:
+
         conn = get_db()
 
         rows = conn.execute(
@@ -98,9 +171,13 @@ def get_table_columns(table_name):
 
         conn.close()
 
-        return [row["name"] for row in rows]
+        return [
+            row["name"]
+            for row in rows
+        ]
 
     except Exception:
+
         return []
 
 
@@ -109,14 +186,6 @@ def get_table_columns(table_name):
 # ============================================================
 
 def find_price_table():
-    """
-    Fiyat kayıtlarının bulunduğu tabloyu bulmaya çalışır.
-
-    Öncelik:
-    1. price_observations
-    2. prices
-    3. diğer uygun tablolar
-    """
 
     tables = get_tables()
 
@@ -131,26 +200,32 @@ def find_price_table():
     ]
 
     for table in preferred_tables:
+
         if table in tables:
             return table
 
-    # Dinamik arama
     for table in tables:
 
         if table.startswith("sqlite_"):
             continue
 
-        columns = get_table_columns(table)
+        columns = get_table_columns(
+            table
+        )
 
         normalized = [
-            str(column).lower().replace("_", "")
+            str(column)
+            .lower()
+            .replace("_", "")
             for column in columns
         ]
 
         has_price = any(
-            "price" in column
-            or "fare" in column
-            or "amount" in column
+            (
+                "price" in column
+                or "fare" in column
+                or "amount" in column
+            )
             for column in normalized
         )
 
@@ -165,6 +240,7 @@ def find_price_table():
 # ============================================================
 
 def normalize_column_name(name):
+
     return (
         str(name)
         .strip()
@@ -180,10 +256,6 @@ def normalize_column_name(name):
 # ============================================================
 
 def get_price_data(limit=100):
-    """
-    Veritabanındaki son fiyat kayıtlarını mümkün olduğunca
-    esnek biçimde okur.
-    """
 
     if not os.path.exists(DB_PATH):
         return []
@@ -194,15 +266,19 @@ def get_price_data(limit=100):
         return []
 
     try:
+
         conn = get_db()
 
-        columns = get_table_columns(table)
+        columns = get_table_columns(
+            table
+        )
 
         if not columns:
+
             conn.close()
+
             return []
 
-        # Öncelikli tarih/zaman kolonları
         order_column = None
 
         preferred_order_columns = [
@@ -216,18 +292,24 @@ def get_price_data(limit=100):
         ]
 
         for candidate in preferred_order_columns:
+
             if candidate in columns:
+
                 order_column = candidate
+
                 break
 
         if order_column:
+
             query = f'''
                 SELECT *
                 FROM "{table}"
                 ORDER BY "{order_column}" DESC
                 LIMIT ?
             '''
+
         else:
+
             query = f'''
                 SELECT *
                 FROM "{table}"
@@ -236,7 +318,9 @@ def get_price_data(limit=100):
 
         rows = conn.execute(
             query,
-            (int(limit),)
+            (
+                int(limit),
+            )
         ).fetchall()
 
         conn.close()
@@ -248,8 +332,10 @@ def get_price_data(limit=100):
             item = {}
 
             for column in columns:
+
                 try:
                     value = row[column]
+
                 except Exception:
                     value = None
 
@@ -262,7 +348,8 @@ def get_price_data(limit=100):
     except Exception as e:
 
         print(
-            f"Veritabani okuma hatasi: {repr(e)}",
+            "Veritabani okuma hatasi:",
+            repr(e),
             flush=True
         )
 
@@ -274,9 +361,6 @@ def get_price_data(limit=100):
 # ============================================================
 
 def calculate_stats(data):
-    """
-    Fiyat verileri üzerinden basit istatistikler üretir.
-    """
 
     prices = []
 
@@ -284,7 +368,9 @@ def calculate_stats(data):
 
         for key, value in row.items():
 
-            normalized = normalize_column_name(key)
+            normalized = normalize_column_name(
+                key
+            )
 
             if (
                 "price" in normalized
@@ -304,7 +390,9 @@ def calculate_stats(data):
                     number = float(value)
 
                     if number >= 0:
-                        prices.append(number)
+                        prices.append(
+                            number
+                        )
 
                     break
 
@@ -312,9 +400,11 @@ def calculate_stats(data):
                     TypeError,
                     ValueError
                 ):
+
                     continue
 
     if not prices:
+
         return {
             "count": len(data),
             "min": None,
@@ -326,7 +416,10 @@ def calculate_stats(data):
         "count": len(data),
         "min": min(prices),
         "max": max(prices),
-        "average": sum(prices) / len(prices)
+        "average": (
+            sum(prices) /
+            len(prices)
+        )
     }
 
 
@@ -335,43 +428,75 @@ def calculate_stats(data):
 # ============================================================
 
 def run_radar_once():
-    """
-    Kök dizindeki GERÇEK app.py dosyasını çalıştırır.
-
-    ÖNEMLİ:
-    Burada kesinlikle:
-        import app
-    kullanılmıyor.
-
-    Çünkü Render:
-        panel/app.py
-    dosyasını uygulama olarak çalıştırıyor.
-
-    "import app" kullanılırsa Python yanlışlıkla panel/app.py
-    dosyasını tekrar yükleyebilir.
-
-    Bunun yerine kök dizindeki:
-        /opt/render/project/src/app.py
-    doğrudan dosya yolundan yükleniyor.
-    """
 
     global radar_last_start
     global radar_last_finish
     global radar_last_error
 
-    radar_last_start = datetime.now(
-        timezone.utc
-    ).isoformat()
+    radar_last_start = (
+        datetime.now(
+            timezone.utc
+        ).isoformat()
+    )
 
+    radar_last_finish = None
     radar_last_error = None
 
-    print("=" * 60, flush=True)
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "=" * 70,
+        flush=True
+    )
+
     print(
         "RADAR MOTORU BASLATILIYOR...",
         flush=True
     )
+
     print(
         f"Proje dizini: {BASE_DIR}",
+        flush=True
+    )
+
+    print(
+        f"Veritabani: {DB_PATH}",
+        flush=True
+    )
+
+    provider = get_provider_status()
+
+    print(
+        "Aktif veri saglayici: "
+        f"{provider['active_provider']}",
+        flush=True
+    )
+
+    print(
+        "SERPAPI API key: "
+        + (
+            "EVET"
+            if get_serpapi_key()
+            else "HAYIR"
+        ),
+        flush=True
+    )
+
+    print(
+        "IGNAV API key legacy: "
+        + (
+            "EVET"
+            if get_ignav_key()
+            else "HAYIR"
+        ),
+        flush=True
+    )
+
+    print(
+        "=" * 70,
         flush=True
     )
 
@@ -379,47 +504,89 @@ def run_radar_once():
 
     try:
 
-        # Kök proje dizinine geçiyoruz.
-        os.chdir(BASE_DIR)
+        # ----------------------------------------------------
+        # KÖK PROJE DİZİNİ
+        # ----------------------------------------------------
 
-        # Kök dizindeki gerçek radar app.py
+        os.chdir(
+            BASE_DIR
+        )
+
+        print(
+            f"Calisma dizini: {os.getcwd()}",
+            flush=True
+        )
+
+        # ----------------------------------------------------
+        # GERÇEK RADAR APP.PY
+        # ----------------------------------------------------
+
         radar_file = os.path.join(
             BASE_DIR,
             "app.py"
         )
 
-        if not os.path.isfile(radar_file):
+        print(
+            f"Radar dosyasi: {radar_file}",
+            flush=True
+        )
+
+        if not os.path.isfile(
+            radar_file
+        ):
 
             raise FileNotFoundError(
                 "Radar ana dosyasi bulunamadi: "
                 + radar_file
             )
 
-        # Dosyayı import app şeklinde değil,
-        # doğrudan dosya yolundan yükle.
-        spec = importlib.util.spec_from_file_location(
-            "radar_engine",
-            radar_file
+        print(
+            "Radar ana dosyasi bulundu.",
+            flush=True
+        )
+
+        # ----------------------------------------------------
+        # DOSYA MODÜLÜNÜ YÜKLE
+        # ----------------------------------------------------
+
+        spec = (
+            importlib.util
+            .spec_from_file_location(
+                "radar_engine_v36",
+                radar_file
+            )
         )
 
         if spec is None:
+
             raise ImportError(
-                "Radar app.py icin import spec olusturulamadi."
+                "Radar app.py icin "
+                "import spec olusturulamadi."
             )
 
         if spec.loader is None:
+
             raise ImportError(
                 "Radar app.py loader bulunamadi."
             )
 
-        radar_app = importlib.util.module_from_spec(
-            spec
+        radar_app = (
+            importlib.util
+            .module_from_spec(
+                spec
+            )
         )
 
-        # DİKKAT:
-        # Bunu sys.modules["app"] olarak kaydetmiyoruz.
-        #
-        # Böylece panel/app.py ile isim çakışması olmaz.
+        print(
+            "Radar modulu yukleniyor...",
+            flush=True
+        )
+
+        # ----------------------------------------------------
+        # KRİTİK:
+        # panel/app.py ile kök app.py birbirine karışmasın.
+        # ----------------------------------------------------
+
         spec.loader.exec_module(
             radar_app
         )
@@ -429,7 +596,10 @@ def run_radar_once():
             flush=True
         )
 
-        # main() kontrolü
+        # ----------------------------------------------------
+        # MAIN KONTROLÜ
+        # ----------------------------------------------------
+
         if not hasattr(
             radar_app,
             "main"
@@ -445,12 +615,15 @@ def run_radar_once():
             flush=True
         )
 
+        # ----------------------------------------------------
+        # MAIN ÇALIŞTIR
+        # ----------------------------------------------------
+
         print(
             "Radar taramasi baslatiliyor...",
             flush=True
         )
 
-        # GERÇEK RADAR
         radar_app.main()
 
         print(
@@ -458,11 +631,26 @@ def run_radar_once():
             flush=True
         )
 
+        print(
+            "=" * 70,
+            flush=True
+        )
+
     except Exception as e:
 
-        radar_last_error = repr(e)
+        radar_last_error = (
+            f"{type(e).__name__}: {e}"
+        )
 
-        print("=" * 60, flush=True)
+        print(
+            "",
+            flush=True
+        )
+
+        print(
+            "=" * 70,
+            flush=True
+        )
 
         print(
             "!!! RADAR HATASI !!!",
@@ -470,21 +658,43 @@ def run_radar_once():
         )
 
         print(
-            repr(e),
+            f"Hata tipi: {type(e).__name__}",
             flush=True
         )
 
-        print("=" * 60, flush=True)
+        print(
+            f"Hata: {e}",
+            flush=True
+        )
+
+        print(
+            "DETAYLI TRACEBACK:",
+            flush=True
+        )
+
+        traceback.print_exc()
+
+        print(
+            "=" * 70,
+            flush=True
+        )
 
     finally:
 
-        radar_last_finish = datetime.now(
-            timezone.utc
-        ).isoformat()
+        radar_last_finish = (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        )
 
         try:
-            os.chdir(old_cwd)
+
+            os.chdir(
+                old_cwd
+            )
+
         except Exception:
+
             pass
 
 
@@ -493,29 +703,43 @@ def run_radar_once():
 # ============================================================
 
 def radar_loop():
-    """
-    Radar motorunu ilk açılışta hemen çalıştırır.
-
-    Sonrasında:
-        RADAR_INTERVAL_MINUTES
-    kadar bekleyip tekrar çalıştırır.
-    """
 
     global radar_started
 
     radar_started = True
 
-    print("=" * 60, flush=True)
+    print(
+        "",
+        flush=True
+    )
+
+    print(
+        "=" * 70,
+        flush=True
+    )
+
     print(
         "RADAR ARKA PLAN DONGUSU AKTIF.",
         flush=True
     )
-    print("=" * 60, flush=True)
 
-    # İlk tarama hemen
+    print(
+        f"Tarama araligi: "
+        f"{RADAR_INTERVAL_MINUTES} dakika",
+        flush=True
+    )
+
+    print(
+        "=" * 70,
+        flush=True
+    )
+
+    # --------------------------------------------------------
+    # İLK TARAMA HEMEN
+    # --------------------------------------------------------
+
     while True:
 
-        # Aynı anda ikinci tarama başlamasın.
         acquired = radar_lock.acquire(
             blocking=False
         )
@@ -523,9 +747,24 @@ def radar_loop():
         if acquired:
 
             try:
+
                 run_radar_once()
 
+            except Exception as e:
+
+                # run_radar_once zaten hata yakalıyor.
+                # Buradaki blok ek güvenliktir.
+
+                print(
+                    "Radar loop beklenmeyen hatasi:",
+                    repr(e),
+                    flush=True
+                )
+
+                traceback.print_exc()
+
             finally:
+
                 radar_lock.release()
 
         else:
@@ -547,7 +786,23 @@ def radar_loop():
             flush=True
         )
 
-        time.sleep(wait_seconds)
+        try:
+
+            time.sleep(
+                wait_seconds
+            )
+
+        except Exception as e:
+
+            print(
+                "Radar bekleme hatasi:",
+                repr(e),
+                flush=True
+            )
+
+            time.sleep(
+                10
+            )
 
 
 # ============================================================
@@ -555,15 +810,22 @@ def radar_loop():
 # ============================================================
 
 def start_radar_background():
-    """
-    Radar thread'ini yalnızca bir kez başlatır.
-    """
 
     global radar_thread
+
+    # --------------------------------------------------------
+    # ZATEN ÇALIŞIYORSA TEKRAR BAŞLATMA
+    # --------------------------------------------------------
 
     if radar_thread is not None:
 
         if radar_thread.is_alive():
+
+            print(
+                "Radar thread zaten aktif.",
+                flush=True
+            )
+
             return
 
     radar_thread = threading.Thread(
@@ -581,12 +843,14 @@ def start_radar_background():
 
 
 # ============================================================
-# ANA PANEL
+# HTML
 # ============================================================
 
 HTML_TEMPLATE = r"""
 <!DOCTYPE html>
+
 <html lang="tr">
+
 <head>
 
 <meta charset="UTF-8">
@@ -662,8 +926,9 @@ body {
 }
 
 .card-value {
-    font-size: 22px;
+    font-size: 20px;
     font-weight: bold;
+    word-break: break-word;
 }
 
 .active {
@@ -676,6 +941,10 @@ body {
 
 .warning {
     color: #b26a00;
+}
+
+.info {
+    color: #1565c0;
 }
 
 .table-card {
@@ -752,8 +1021,8 @@ pre {
         </h1>
 
         <p>
-            Uçuş fiyatlarını otomatik olarak tarayan
-            radar ve kontrol paneli.
+            Google Flights / SerpApi tabanlı
+            otomatik uçuş fiyat radarı.
         </p>
 
         <a
@@ -771,12 +1040,10 @@ pre {
         <div class="card">
 
             <div class="card-title">
-                Sistem durumu
+                Sistem
             </div>
 
-            <div
-                class="card-value active"
-            >
+            <div class="card-value active">
                 Aktif
             </div>
 
@@ -786,23 +1053,29 @@ pre {
         <div class="card">
 
             <div class="card-title">
-                Radar durumu
+                Radar
             </div>
 
             <div class="card-value">
 
                 {% if radar_running %}
+
                     <span class="active">
                         Çalışıyor
                     </span>
+
                 {% elif radar_error %}
+
                     <span class="error">
                         Hata
                     </span>
+
                 {% else %}
+
                     <span class="warning">
                         Bekliyor
                     </span>
+
                 {% endif %}
 
             </div>
@@ -813,11 +1086,11 @@ pre {
         <div class="card">
 
             <div class="card-title">
-                Son radar başlangıcı
+                Aktif veri sağlayıcı
             </div>
 
-            <div class="card-value">
-                {{ radar_last_start or "-" }}
+            <div class="card-value info">
+                {{ provider_status.active_provider }}
             </div>
 
         </div>
@@ -826,11 +1099,52 @@ pre {
         <div class="card">
 
             <div class="card-title">
-                Son radar bitişi
+                SerpApi
             </div>
 
             <div class="card-value">
-                {{ radar_last_finish or "-" }}
+
+                {% if provider_status.serpapi == "OK" %}
+
+                    <span class="active">
+                        Hazır
+                    </span>
+
+                {% else %}
+
+                    <span class="error">
+                        API anahtarı eksik
+                    </span>
+
+                {% endif %}
+
+            </div>
+
+        </div>
+
+
+        <div class="card">
+
+            <div class="card-title">
+                Telegram
+            </div>
+
+            <div class="card-value">
+
+                {% if telegram_status == "OK" %}
+
+                    <span class="active">
+                        Hazır
+                    </span>
+
+                {% else %}
+
+                    <span class="warning">
+                        Yapılandırılmamış
+                    </span>
+
+                {% endif %}
+
             </div>
 
         </div>
@@ -848,44 +1162,21 @@ pre {
 
         </div>
 
-
-        <div class="card">
-
-            <div class="card-title">
-                Veritabanı
-            </div>
-
-            <div class="card-value">
-
-                {% if db_exists %}
-                    <span class="active">
-                        Hazır
-                    </span>
-                {% else %}
-                    <span class="warning">
-                        Henüz oluşmadı
-                    </span>
-                {% endif %}
-
-            </div>
-
-        </div>
-
     </div>
 
 
     {% if radar_error %}
 
-    <div class="card"
-         style="margin-bottom:20px;">
+    <div
+        class="card"
+        style="margin-bottom:20px;"
+    >
 
         <div class="card-title">
             Son radar hatası
         </div>
 
-        <pre class="error">
-{{ radar_error }}
-        </pre>
+        <pre class="error">{{ radar_error }}</pre>
 
     </div>
 
@@ -897,29 +1188,11 @@ pre {
         <div class="card">
 
             <div class="card-title">
-                IGNAV
+                Son başlangıç
             </div>
 
             <div class="card-value">
-
-                {% if ignav_status == "OK" %}
-                    <span class="active">
-                        Hazır
-                    </span>
-                {% elif ignav_status == "BILLING_BLOCKED" %}
-                    <span class="error">
-                        402 / Billing
-                    </span>
-                {% elif ignav_status == "NOT_CONFIGURED" %}
-                    <span class="warning">
-                        API anahtarı yok
-                    </span>
-                {% else %}
-                    <span class="warning">
-                        Kontrol bekliyor
-                    </span>
-                {% endif %}
-
+                {{ radar_last_start or "-" }}
             </div>
 
         </div>
@@ -928,25 +1201,11 @@ pre {
         <div class="card">
 
             <div class="card-title">
-                Telegram
+                Son bitiş
             </div>
 
             <div class="card-value">
-
-                {% if telegram_status == "OK" %}
-                    <span class="active">
-                        Hazır
-                    </span>
-                {% elif telegram_status == "NOT_CONFIGURED" %}
-                    <span class="warning">
-                        Yapılandırılmamış
-                    </span>
-                {% else %}
-                    <span class="warning">
-                        Kontrol bekliyor
-                    </span>
-                {% endif %}
-
+                {{ radar_last_finish or "-" }}
             </div>
 
         </div>
@@ -968,15 +1227,19 @@ pre {
         <div class="card">
 
             <div class="card-title">
-                En düşük fiyat
+                En düşük
             </div>
 
             <div class="card-value">
 
                 {% if stats.min is not none %}
+
                     {{ "%.2f"|format(stats.min) }}
+
                 {% else %}
+
                     -
+
                 {% endif %}
 
             </div>
@@ -987,15 +1250,19 @@ pre {
         <div class="card">
 
             <div class="card-title">
-                Ortalama fiyat
+                Ortalama
             </div>
 
             <div class="card-value">
 
                 {% if stats.average is not none %}
+
                     {{ "%.2f"|format(stats.average) }}
+
                 {% else %}
+
                     -
+
                 {% endif %}
 
             </div>
@@ -1006,15 +1273,19 @@ pre {
         <div class="card">
 
             <div class="card-title">
-                En yüksek fiyat
+                En yüksek
             </div>
 
             <div class="card-value">
 
                 {% if stats.max is not none %}
+
                     {{ "%.2f"|format(stats.max) }}
+
                 {% else %}
+
                     -
+
                 {% endif %}
 
             </div>
@@ -1092,6 +1363,7 @@ pre {
 </div>
 
 </body>
+
 </html>
 """
 
@@ -1114,6 +1386,7 @@ def index():
     columns = []
 
     if data:
+
         columns = list(
             data[0].keys()
         )
@@ -1121,9 +1394,13 @@ def index():
     radar_running = False
 
     if radar_thread is not None:
-        radar_running = radar_thread.is_alive()
+
+        radar_running = (
+            radar_thread.is_alive()
+        )
 
     return render_template_string(
+
         HTML_TEMPLATE,
 
         rows=data,
@@ -1134,19 +1411,29 @@ def index():
 
         radar_running=radar_running,
 
-        radar_last_start=radar_last_start,
+        radar_last_start=
+            radar_last_start,
 
-        radar_last_finish=radar_last_finish,
+        radar_last_finish=
+            radar_last_finish,
 
-        radar_error=radar_last_error,
+        radar_error=
+            radar_last_error,
 
-        interval=RADAR_INTERVAL_MINUTES,
+        interval=
+            RADAR_INTERVAL_MINUTES,
 
-        db_exists=os.path.exists(DB_PATH),
+        db_exists=
+            os.path.exists(
+                DB_PATH
+            ),
 
-        ignav_status=get_ignav_status(),
+        provider_status=
+            get_provider_status(),
 
-        telegram_status=get_telegram_status()
+        telegram_status=
+            get_telegram_status()
+
     )
 
 
@@ -1162,9 +1449,13 @@ def api_data():
     )
 
     return jsonify({
+
         "success": True,
+
         "count": len(data),
+
         "data": data
+
     })
 
 
@@ -1178,7 +1469,10 @@ def api_radar_status():
     running = False
 
     if radar_thread is not None:
-        running = radar_thread.is_alive()
+
+        running = (
+            radar_thread.is_alive()
+        )
 
     return jsonify({
 
@@ -1186,14 +1480,44 @@ def api_radar_status():
 
         "started": radar_started,
 
-        "last_start": radar_last_start,
+        "last_start":
+            radar_last_start,
 
-        "last_finish": radar_last_finish,
+        "last_finish":
+            radar_last_finish,
 
-        "last_error": radar_last_error,
+        "last_error":
+            radar_last_error,
 
         "interval_minutes":
             RADAR_INTERVAL_MINUTES
+
+    })
+
+
+# ============================================================
+# SERPAPI DURUMU
+# ============================================================
+
+@app.route("/api/serpapi-status")
+def api_serpapi_status():
+
+    configured = bool(
+        get_serpapi_key()
+    )
+
+    return jsonify({
+
+        "provider":
+            "SERPAPI / GOOGLE FLIGHTS",
+
+        "configured":
+            configured,
+
+        "status":
+            "OK"
+            if configured
+            else "NOT_CONFIGURED"
 
     })
 
@@ -1204,60 +1528,20 @@ def api_radar_status():
 
 def get_ignav_status():
 
-    api_key = os.getenv(
-        "IGNAV_API_KEY",
-        ""
-    ).strip()
+    api_key = get_ignav_key()
 
     if not api_key:
+
         return "NOT_CONFIGURED"
 
-    # Root app'in persistent 402 durumu varsa
-    # bunu okumaya çalışıyoruz.
-    try:
+    # --------------------------------------------------------
+    # IGNAV artık radar sağlayıcısı değildir.
+    #
+    # Eski anahtar Render'da kalabilir.
+    # Bu nedenle burada yalnızca LEGACY olarak gösteriyoruz.
+    # --------------------------------------------------------
 
-        conn = get_db()
-
-        tables = get_tables()
-
-        if "api_state" in tables:
-
-            columns = get_table_columns(
-                "api_state"
-            )
-
-            rows = conn.execute(
-                "SELECT * FROM api_state"
-            ).fetchall()
-
-            conn.close()
-
-            for row in rows:
-
-                values = [
-                    str(row[column])
-                    for column in columns
-                    if row[column] is not None
-                ]
-
-                text = " ".join(
-                    values
-                ).lower()
-
-                if (
-                    "402" in text
-                    or "billing" in text
-                    or "blocked" in text
-                ):
-                    return "BILLING_BLOCKED"
-
-        else:
-            conn.close()
-
-    except Exception:
-        pass
-
-    return "OK"
+    return "LEGACY_CONFIGURED"
 
 
 @app.route("/api/ignav-status")
@@ -1265,14 +1549,14 @@ def api_ignav_status():
 
     return jsonify({
 
-        "status": get_ignav_status(),
+        "status":
+            get_ignav_status(),
 
-        "configured": bool(
-            os.getenv(
-                "IGNAV_API_KEY",
-                ""
-            ).strip()
-        )
+        "configured":
+            bool(get_ignav_key()),
+
+        "active_provider":
+            "SERPAPI / GOOGLE FLIGHTS"
 
     })
 
@@ -1283,17 +1567,12 @@ def api_ignav_status():
 
 def get_telegram_status():
 
-    token = os.getenv(
-        "TELEGRAM_BOT_TOKEN",
-        ""
-    ).strip()
+    token = get_telegram_token()
 
-    chat_id = os.getenv(
-        "TELEGRAM_CHAT_ID",
-        ""
-    ).strip()
+    chat_id = get_telegram_chat_id()
 
     if not token or not chat_id:
+
         return "NOT_CONFIGURED"
 
     return "OK"
@@ -1302,23 +1581,20 @@ def get_telegram_status():
 @app.route("/api/telegram-status")
 def api_telegram_status():
 
-    token = os.getenv(
-        "TELEGRAM_BOT_TOKEN",
-        ""
-    ).strip()
+    token = get_telegram_token()
 
-    chat_id = os.getenv(
-        "TELEGRAM_CHAT_ID",
-        ""
-    ).strip()
+    chat_id = get_telegram_chat_id()
 
     return jsonify({
 
-        "status": get_telegram_status(),
+        "status":
+            get_telegram_status(),
 
-        "token_configured": bool(token),
+        "token_configured":
+            bool(token),
 
-        "chat_id_configured": bool(chat_id)
+        "chat_id_configured":
+            bool(chat_id)
 
     })
 
@@ -1333,23 +1609,33 @@ def health():
     running = False
 
     if radar_thread is not None:
-        running = radar_thread.is_alive()
+
+        running = (
+            radar_thread.is_alive()
+        )
+
+    provider = get_provider_status()
 
     return jsonify({
 
         "status": "ok",
 
-        "service": "ucus-hata-fiyati-panel",
+        "service":
+            "ucus-hata-fiyati-panel",
 
-        "database": os.path.exists(
-            DB_PATH
-        ),
+        "database":
+            os.path.exists(DB_PATH),
+
+        "provider":
+            provider,
 
         "radar": {
 
-            "running": running,
+            "running":
+                running,
 
-            "started": radar_started,
+            "started":
+                radar_started,
 
             "last_start":
                 radar_last_start,
@@ -1365,9 +1651,6 @@ def health():
 
         },
 
-        "ignav":
-            get_ignav_status(),
-
         "telegram":
             get_telegram_status()
 
@@ -1378,17 +1661,69 @@ def health():
 # UYGULAMA BAŞLANGICI
 # ============================================================
 
-# Gunicorn import ettiğinde radar başlatılır.
-#
-# Render'da WEB_CONCURRENCY=1 olduğu için tek worker
-# üzerinden tek radar thread'i çalışacaktır.
+def should_start_background_radar():
 
-if os.getenv(
-    "WERKZEUG_RUN_MAIN"
-) in (
-    None,
-    "true"
-):
+    # --------------------------------------------------------
+    # Flask development server için:
+    # WERKZEUG_RUN_MAIN = "true" olan gerçek child process'tir.
+    #
+    # Gunicorn için bu değişken normalde yoktur.
+    # --------------------------------------------------------
+
+    werkzeug_main = os.getenv(
+        "WERKZEUG_RUN_MAIN"
+    )
+
+    if werkzeug_main is None:
+
+        return True
+
+    return werkzeug_main == "true"
+
+
+if should_start_background_radar():
+
+    print(
+        "=" * 70,
+        flush=True
+    )
+
+    print(
+        "PANEL APP V3.6 YUKLENDI.",
+        flush=True
+    )
+
+    print(
+        "SERPAPI:",
+        (
+            "HAZIR"
+            if get_serpapi_key()
+            else "API KEY EKSIK"
+        ),
+        flush=True
+    )
+
+    print(
+        "TELEGRAM:",
+        (
+            "HAZIR"
+            if get_telegram_token()
+            and get_telegram_chat_id()
+            else "EKSIK"
+        ),
+        flush=True
+    )
+
+    print(
+        f"RADAR INTERVAL: "
+        f"{RADAR_INTERVAL_MINUTES} dakika",
+        flush=True
+    )
+
+    print(
+        "=" * 70,
+        flush=True
+    )
 
     start_radar_background()
 
@@ -1400,12 +1735,16 @@ if os.getenv(
 if __name__ == "__main__":
 
     app.run(
+
         host="0.0.0.0",
+
         port=int(
             os.getenv(
                 "PORT",
                 "5000"
             )
         ),
+
         debug=False
+
     )
